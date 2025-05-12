@@ -5,6 +5,8 @@
 #include <mutex>
 #include <queue>
 #include <cmath>
+#include <sstream>
+#include <iomanip>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -19,6 +21,7 @@
 #include "esp_netif.h"
 #include "esp_event.h"
 #include "opus/opus.h"
+#include "mbedtls/base64.h"
 
 static const char *TAG = "AUDIO_UPLOAD";
 
@@ -338,6 +341,26 @@ public:
     }
 };
 
+// 工具函数 - Base64编码
+std::string base64Encode(const std::vector<uint8_t>& data) {
+    size_t output_len = 0;
+    // 计算Base64编码后的长度
+    mbedtls_base64_encode(nullptr, 0, &output_len, data.data(), data.size());
+
+    // 分配足够的内存
+    std::vector<unsigned char> base64_buffer(output_len + 1); // +1 为了结尾的 null 字符
+
+    // 执行编码
+    mbedtls_base64_encode(base64_buffer.data(), base64_buffer.size(), &output_len,
+                          data.data(), data.size());
+
+    // 确保字符串正确终止
+    base64_buffer[output_len] = 0;
+
+    // 转换为std::string并返回
+    return std::string(reinterpret_cast<char*>(base64_buffer.data()));
+}
+
 // HTTP客户端类
 class HttpClient {
 private:
@@ -387,12 +410,25 @@ public:
             return false;
         }
 
+        // 将音频数据编码为Base64
+        std::string base64_audio = base64Encode(opus_data);
+
+        // 构建JSON数据
+        std::stringstream json_ss;
+        json_ss << "{\"audio_data\":\"" << base64_audio << "\",";
+        json_ss << "\"format\":\"opus\",";
+        json_ss << "\"sample_rate\":" << Config::SAMPLE_RATE << ",";
+        json_ss << "\"channels\":" << Config::CHANNELS << "}";
+
+        std::string json_data = json_ss.str();
+        ESP_LOGI(TAG, "JSON数据大小: %d 字节", json_data.length());
+
         // 设置HTTP头
-        esp_http_client_set_header(client, "Content-Type", "audio/opus");
+        esp_http_client_set_header(client, "Content-Type", "application/json");
         esp_http_client_set_header(client, "Authorization", std::string("Bearer ").append(Config::API_KEY).c_str());
 
         // 设置POST数据
-        esp_http_client_set_post_field(client, (const char*)opus_data.data(), opus_data.size());
+        esp_http_client_set_post_field(client, json_data.c_str(), json_data.length());
 
         // 执行HTTP请求
         esp_err_t err = esp_http_client_perform(client);
