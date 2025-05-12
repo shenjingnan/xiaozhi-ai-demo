@@ -140,7 +140,7 @@ public:
 
         i2s_std_config_t std_cfg = {
             .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(Config::SAMPLE_RATE),
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(Config::SAMPLE_BITS, Config::CHANNELS, I2S_SLOT_MODE_MONO),
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
             .gpio_cfg = {
                 .mclk = I2S_GPIO_UNUSED,
                 .bclk = Config::I2S_SCK_IO,
@@ -376,11 +376,10 @@ public:
         ESP_LOGI(TAG, "发送音频数据，大小: %d 字节", opus_data.size());
 
         // 配置HTTP客户端
-        esp_http_client_config_t config = {
-            .url = Config::API_ENDPOINT,
-            .event_handler = httpEventHandler,
-            .method = HTTP_METHOD_POST,
-        };
+        esp_http_client_config_t config = {};
+        config.url = Config::API_ENDPOINT;
+        config.event_handler = httpEventHandler;
+        config.method = HTTP_METHOD_POST;
 
         esp_http_client_handle_t client = esp_http_client_init(&config);
         if (!client) {
