@@ -98,3 +98,74 @@ int opus_encoder_ctl(OpusEncoder *st, int request, ...) {
     va_end(ap);
     return ret;
 }
+
+/* 简单的 Opus 解码器实现 */
+
+struct OpusDecoder {
+    int sample_rate;
+    int channels;
+};
+
+OpusDecoder *opus_decoder_create(int Fs, int channels, int *error) {
+    OpusDecoder *st = (OpusDecoder *)malloc(sizeof(OpusDecoder));
+    if (st == NULL) {
+        if (error)
+            *error = OPUS_ALLOC_FAIL;
+        return NULL;
+    }
+    
+    st->sample_rate = Fs;
+    st->channels = channels;
+    
+    if (error)
+        *error = OPUS_OK;
+    
+    return st;
+}
+
+void opus_decoder_destroy(OpusDecoder *st) {
+    if (st)
+        free(st);
+}
+
+int opus_decode(OpusDecoder *st, const unsigned char *data, int len, short *pcm, int frame_size, int decode_fec) {
+    if (st == NULL || data == NULL || pcm == NULL || frame_size <= 0)
+        return OPUS_BAD_ARG;
+    
+    /* 这里是一个非常简单的实现，实际上只是将压缩数据解压为 PCM */
+    /* 在实际应用中，应该使用真正的 Opus 解码器 */
+    
+    /* 简单地将每个字节转换回 PCM 样本 */
+    int samples_to_decode = len;
+    if (samples_to_decode > frame_size)
+        samples_to_decode = frame_size;
+    
+    for (int i = 0; i < samples_to_decode; i++) {
+        /* 简单地将 8 位数据转换为 16 位 PCM 样本 */
+        pcm[i] = (short)((data[i] - 128) << 8);
+    }
+    
+    return samples_to_decode;
+}
+
+int opus_decoder_ctl(OpusDecoder *st, int request, ...) {
+    if (st == NULL)
+        return OPUS_BAD_ARG;
+    
+    va_list ap;
+    va_start(ap, request);
+    
+    int ret = OPUS_OK;
+    
+    switch (request) {
+        case OPUS_RESET_STATE:
+            /* 什么都不做，只是重置状态 */
+            break;
+        default:
+            ret = OPUS_UNIMPLEMENTED;
+            break;
+    }
+    
+    va_end(ap);
+    return ret;
+}

@@ -1,0 +1,8 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+1. 你在 docs 目录将会找到一个 memories.md 文件，这是一个回忆文件，帮助你回忆项目偏好，在你每次完成工作后，请总结本次工作的用户意图和用户偏好，并将其记录在docs/memories.md中
+2. 当你每次开始工作时，请默认带上 docs/memories.md 这里的内容，他会帮助你更好的理解本项目
+3. 如果你在项目中找不到 docs/memories.md 请自行创建此文件

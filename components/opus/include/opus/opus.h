@@ -25,15 +25,23 @@ extern "C" {
 #define OPUS_GET_BITRATE(x)          4003
 #define OPUS_SET_COMPLEXITY(x)       4010
 #define OPUS_GET_COMPLEXITY(x)       4011
+#define OPUS_RESET_STATE             4028
 
 /* 编码器结构体 */
 typedef struct OpusEncoder OpusEncoder;
+typedef struct OpusDecoder OpusDecoder;
 
-/* 函数声明 */
+/* 编码器函数声明 */
 OpusEncoder *opus_encoder_create(int Fs, int channels, int application, int *error);
 void opus_encoder_destroy(OpusEncoder *st);
 int opus_encode(OpusEncoder *st, const short *pcm, int frame_size, unsigned char *data, int max_data_bytes);
 int opus_encoder_ctl(OpusEncoder *st, int request, ...);
+
+/* 解码器函数声明 */
+OpusDecoder *opus_decoder_create(int Fs, int channels, int *error);
+void opus_decoder_destroy(OpusDecoder *st);
+int opus_decode(OpusDecoder *st, const unsigned char *data, int len, short *pcm, int frame_size, int decode_fec);
+int opus_decoder_ctl(OpusDecoder *st, int request, ...);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,21 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+请帮我对比 主分支 和 当前分支 的改动代码，给我一个合理的commit 以及 commit详细信息
+
+我希望你提供给我的内容
+1. commit标题和改动说明
+2. 你认为合理的一个分支名称
+3. 你可以通过命令：git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@' 知道当前仓库的主分支名称
+3. 我希望你返回给我的commit内容遵循以下格式
+Type(<scope>): <subject>
+
+ <body>
+
+
+我的要求：
+1. commit 的标题应该符合git 规范
+2. 不要考虑当前的分支名称，当前分支名不具有参考价值
+3. 不要帮我提交代码，只需要告诉我你觉得合理的 commit标题和详细内容即可

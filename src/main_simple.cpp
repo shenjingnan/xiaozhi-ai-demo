@@ -25,7 +25,6 @@ namespace Config {
 
     // 音频配置
     const int SAMPLE_RATE = 16000;        // 16kHz
-    const int SAMPLE_BITS = 32;           // INMP441输出32位
     const int CHANNELS = 1;               // 单声道
     const int FRAME_SIZE = 320;           // 20ms @ 16kHz
 }
@@ -57,7 +56,7 @@ public:
 
         i2s_std_config_t std_cfg = {
             .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(Config::SAMPLE_RATE),
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(Config::SAMPLE_BITS, Config::CHANNELS, I2S_SLOT_MODE_MONO),
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO),
             .gpio_cfg = {
                 .mclk = I2S_GPIO_UNUSED,
                 .bclk = Config::I2S_SCK_IO,
@@ -89,7 +88,7 @@ public:
     }
 
     esp_err_t readFrame(std::vector<int16_t>& pcm_data) {
-        const size_t buffer_size = Config::FRAME_SIZE * (Config::SAMPLE_BITS / 8);
+        const size_t buffer_size = Config::FRAME_SIZE * sizeof(int32_t); // 32位数据
         std::vector<uint8_t> i2s_buffer(buffer_size);
         size_t bytes_read = 0;
 
@@ -103,7 +102,7 @@ public:
         pcm_data.resize(Config::FRAME_SIZE);
         for (int i = 0; i < Config::FRAME_SIZE; i++) {
             // INMP441输出的是32位有符号整数，左对齐，需要右移16位
-            int32_t sample = *reinterpret_cast<int32_t*>(&i2s_buffer[i * (Config::SAMPLE_BITS / 8)]) >> 16;
+            int32_t sample = *reinterpret_cast<int32_t*>(&i2s_buffer[i * sizeof(int32_t)]) >> 16;
             pcm_data[i] = static_cast<int16_t>(sample);
         }
 
@@ -197,4 +196,4 @@ public:
 extern "C" void app_main(void) {
     AudioApp app;
     app.start();
-}
+} 
