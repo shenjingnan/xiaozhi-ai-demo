@@ -1,6 +1,16 @@
 # 复刻小智
 
+本项目尝试复刻小智AI
+
 小智 AI 源码地址: https://github.com/78/xiaozhi-esp32
+
+如何阅读本项目?
+你可以在目录中看到 [examples](./examples/) 目录。
+目录中每一个子目录都是一个小项目，使用 PlatformIO
+每一个小项目都会包含一个 README.md 里面包含了一些重要信息
+每个小项目都可以独立运行
+
+建议结合 B站 视频一起食用: https://space.bilibili.com/24615859
 
 ## AI 提示词
 
