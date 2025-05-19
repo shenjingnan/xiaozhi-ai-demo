@@ -1,0 +1,3 @@
+[submodule "xiaozhi-replica"]
+	path = xiaozhi-replica
+	url = git@github.com:shenjingnan/xiaozhi-replica.git
