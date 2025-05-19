@@ -2,7 +2,7 @@
 
 小智 AI 源码地址：https://github.com/78/xiaozhi-esp32
 
-## 复刻小智的简化版交互时序图
+## 简化版交互时序图
 
 ```mermaid
 sequenceDiagram
