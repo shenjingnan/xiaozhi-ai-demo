@@ -177,14 +177,15 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
         int samples = buffer_len / sizeof(int16_t);
 
         // 对 INMP441 的数据进行处理
-        // 麦克风输出左对齐数据，可能需要调整格式
+        // 麦克风输出左对齐数据，进行信号电平调整
         for (int i = 0; i < samples; i++) {
-            // 应用小幅增益以改善信号电平
-            // INMP441 有时输出较低电平的信号，需要放大
+            // 当前使用原始信号电平（无增益）
+            // 测试表明原始电平已足够满足唤醒词检测需求
             int32_t sample = static_cast<int32_t>(buffer[i]);
 
-            // 应用 2 倍增益，但避免溢出
-            sample = sample * 2;
+            // 可选：应用 2 倍增益以提升信号强度（当前已禁用）
+            // 如果发现信号电平不足，可以取消下面这行的注释
+            // sample = sample * 2;
 
             // 限制在 16 位有符号整数范围内
             if (sample > 32767) {

@@ -7,5 +7,7 @@ set(requires
 idf_component_register(SRCS
                        main.cc
                        bsp_board.cc
+                       INCLUDE_DIRS
+                       "."
                        )
 
