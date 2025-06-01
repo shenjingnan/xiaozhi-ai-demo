@@ -23,17 +23,61 @@ extern "C"
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_wn_iface.h"  // 唤醒词检测接口
-#include "esp_wn_models.h" // 唤醒词模型管理
-#include "model_path.h"    // 模型路径定义
-#include "bsp_board.h"     // 板级支持包，INMP441麦克风驱动
-#include "esp_log.h"       // ESP日志系统
-#include "mock_voices/welcome.h"       // 欢迎音频数据文件
+#include "esp_wn_iface.h"        // 唤醒词检测接口
+#include "esp_wn_models.h"       // 唤醒词模型管理
+#include "model_path.h"          // 模型路径定义
+#include "bsp_board.h"           // 板级支持包，INMP441麦克风驱动
+#include "esp_log.h"             // ESP日志系统
+#include "mock_voices/welcome.h" // 欢迎音频数据文件
+#include "driver/gpio.h"         // GPIO驱动
 }
 
 static const char *TAG = "唤醒词检测"; // 日志标签
 
+// 外接LED GPIO定义
+#define LED_GPIO GPIO_NUM_21 // 外接LED灯珠连接到GPIO21
 
+/**
+ * @brief 初始化外接LED GPIO
+ *
+ * 配置GPIO21为输出模式，用于控制外接LED灯珠
+ */
+static void init_led(void)
+{
+    ESP_LOGI(TAG, "正在初始化外接LED (GPIO21)...");
+
+    // 配置GPIO21为输出模式
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << LED_GPIO),    // 设置GPIO21
+        .mode = GPIO_MODE_OUTPUT,              // 输出模式
+        .pull_up_en = GPIO_PULLUP_DISABLE,     // 禁用上拉
+        .pull_down_en = GPIO_PULLDOWN_DISABLE, // 禁用下拉
+        .intr_type = GPIO_INTR_DISABLE         // 禁用中断
+    };
+
+    esp_err_t ret = gpio_config(&io_conf);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "外接LED GPIO初始化失败: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // 初始状态设置为关闭（低电平）
+    gpio_set_level(LED_GPIO, 0);
+    ESP_LOGI(TAG, "✓ 外接LED初始化成功，初始状态：关闭");
+}
+
+static void led_turn_on(void)
+{
+    gpio_set_level(LED_GPIO, 1);
+    ESP_LOGI(TAG, "外接LED点亮");
+}
+
+static void led_turn_off(void)
+{
+    gpio_set_level(LED_GPIO, 0);
+    ESP_LOGI(TAG, "外接LED熄灭");
+}
 
 /**
  * @brief 应用程序主入口函数
@@ -43,7 +87,10 @@ static const char *TAG = "唤醒词检测"; // 日志标签
  */
 extern "C" void app_main(void)
 {
-    // ========== 第一步：初始化INMP441麦克风硬件 ==========
+    // ========== 第一步：初始化外接LED ==========
+    init_led();
+
+    // ========== 第二步：初始化INMP441麦克风硬件 ==========
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
     ESP_LOGI(TAG, "音频参数: 采样率16kHz, 单声道, 16位深度");
 
@@ -69,7 +116,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 音频播放初始化成功");
 
-    // ========== 第三步：初始化唤醒词检测模型 ==========
+    // ========== 第三步：初始化语音识别模型 ==========
     ESP_LOGI(TAG, "正在初始化唤醒词检测模型...");
 
     // 从模型目录加载所有可用的语音识别模型
@@ -161,9 +208,12 @@ extern "C" void app_main(void)
             // 播放音频提示音
             ESP_LOGI(TAG, "播放音频提示音");
             esp_err_t audio_ret = bsp_play_audio(welcome, welcome_len);
-            if (audio_ret != ESP_OK) {
+            if (audio_ret != ESP_OK)
+            {
                 ESP_LOGE(TAG, "音频播放失败: %s", esp_err_to_name(audio_ret));
-            } else {
+            }
+            else
+            {
                 ESP_LOGI(TAG, "✓ 音频播放成功");
             }
 
