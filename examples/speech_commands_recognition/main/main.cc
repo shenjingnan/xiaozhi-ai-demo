@@ -52,6 +52,7 @@ typedef enum {
 // 命令词ID定义（对应commands_cn.txt中的ID）
 #define COMMAND_TURN_OFF_LIGHT 308  // "帮我关灯"
 #define COMMAND_TURN_ON_LIGHT  309  // "帮我开灯"
+#define COMMAND_BYE_BYE        314  // "拜拜"
 
 // 全局变量
 static system_state_t current_state = STATE_WAITING_WAKEUP;
@@ -100,6 +101,29 @@ static void led_turn_off(void)
 {
     gpio_set_level(LED_GPIO, 0);
     ESP_LOGI(TAG, "外接LED熄灭");
+}
+
+/**
+ * @brief 执行退出逻辑
+ *
+ * 播放再见音频并返回等待唤醒状态
+ */
+static void execute_exit_logic(void)
+{
+    // 播放再见音频
+    ESP_LOGI(TAG, "播放再见音频...");
+    esp_err_t audio_ret = bsp_play_audio(byebye, byebye_len);
+    if (audio_ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "✓ 再见音频播放成功");
+    }
+    else
+    {
+        ESP_LOGE(TAG, "再见音频播放失败: %s", esp_err_to_name(audio_ret));
+    }
+
+    current_state = STATE_WAITING_WAKEUP;
+    ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
 }
 
 /**
@@ -258,8 +282,8 @@ extern "C" void app_main(void)
     multinet->print_active_speech_commands(mn_model_data);
 
     ESP_LOGI(TAG, "✓ 命令词配置完成");
-    ESP_LOGI(TAG, "支持的命令: ID=%d('帮我开灯'), ID=%d('帮我关灯')",
-             COMMAND_TURN_ON_LIGHT, COMMAND_TURN_OFF_LIGHT);
+    ESP_LOGI(TAG, "支持的命令: ID=%d('帮我开灯'), ID=%d('帮我关灯'), ID=%d('拜拜')",
+             COMMAND_TURN_ON_LIGHT, COMMAND_TURN_OFF_LIGHT, COMMAND_BYE_BYE);
 
     // ========== 第四步：准备音频缓冲区 ==========
     // 获取模型要求的音频数据块大小（样本数 × 每样本字节数）
@@ -325,7 +349,7 @@ extern "C" void app_main(void)
                 command_timeout_start = xTaskGetTickCount();
                 multinet->clean(mn_model_data); // 清理命令词识别缓冲区
                 ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
-                ESP_LOGI(TAG, "支持的指令: '帮我开灯' 或 '帮我关灯'");
+                ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
             }
         }
         else if (current_state == STATE_WAITING_COMMAND)
@@ -370,6 +394,12 @@ extern "C" void app_main(void)
                             ESP_LOGI(TAG, "✓ 关灯确认音频播放成功");
                         }
                     }
+                    else if (command_id == COMMAND_BYE_BYE)
+                    {
+                        ESP_LOGI(TAG, "👋 检测到拜拜命令，立即退出");
+                        execute_exit_logic();
+                        continue; // 跳过后续的超时重置逻辑，直接进入下一次循环
+                    }
                     else
                     {
                         ESP_LOGW(TAG, "⚠️  未知命令ID: %d", command_id);
@@ -380,26 +410,12 @@ extern "C" void app_main(void)
                 command_timeout_start = xTaskGetTickCount();
                 multinet->clean(mn_model_data); // 清理命令词识别缓冲区
                 ESP_LOGI(TAG, "命令执行完成，重新开始5秒倒计时");
-                ESP_LOGI(TAG, "可以继续说出指令: '帮我开灯' 或 '帮我关灯'");
+                ESP_LOGI(TAG, "可以继续说出指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
             }
             else if (mn_state == ESP_MN_STATE_TIMEOUT)
             {
                 ESP_LOGW(TAG, "⏰ 命令词识别超时");
-
-                // 播放再见音频
-                ESP_LOGI(TAG, "播放再见音频...");
-                esp_err_t audio_ret = bsp_play_audio(byebye, byebye_len);
-                if (audio_ret == ESP_OK)
-                {
-                    ESP_LOGI(TAG, "✓ 再见音频播放成功");
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "再见音频播放失败: %s", esp_err_to_name(audio_ret));
-                }
-
-                current_state = STATE_WAITING_WAKEUP;
-                ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
+                execute_exit_logic();
             }
             else
             {
@@ -408,21 +424,7 @@ extern "C" void app_main(void)
                 if ((current_time - command_timeout_start) > pdMS_TO_TICKS(COMMAND_TIMEOUT_MS))
                 {
                     ESP_LOGW(TAG, "⏰ 命令词等待超时 (%lu秒)", (unsigned long)(COMMAND_TIMEOUT_MS / 1000));
-
-                    // 播放再见音频
-                    ESP_LOGI(TAG, "播放再见音频...");
-                    esp_err_t audio_ret = bsp_play_audio(byebye, byebye_len);
-                    if (audio_ret == ESP_OK)
-                    {
-                        ESP_LOGI(TAG, "✓ 再见音频播放成功");
-                    }
-                    else
-                    {
-                        ESP_LOGE(TAG, "再见音频播放失败: %s", esp_err_to_name(audio_ret));
-                    }
-
-                    current_state = STATE_WAITING_WAKEUP;
-                    ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
+                    execute_exit_logic();
                 }
             }
         }
