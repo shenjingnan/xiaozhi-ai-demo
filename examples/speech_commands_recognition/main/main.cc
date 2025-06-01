@@ -1,20 +1,29 @@
 /**
  * @file main.cc
- * @brief ESP32-S3 INMP441麦克风唤醒词检测主程序
+ * @brief ESP32-S3 智能语音助手 - 语音命令识别主程序
  *
- * 本程序实现了基于ESP32-S3开发板和INMP441数字麦克风的唤醒词检测功能。
- * 支持通过idf.py menuconfig配置的各种唤醒词模型。
- * 程序会自动读取sdkconfig中配置的唤醒词模型，无需手动修改代码。
+ * 本程序实现了完整的智能语音助手功能，包括：
+ * 1. 语音唤醒检测 - 支持"你好小智"等多种唤醒词
+ * 2. 命令词识别 - 支持"帮我开灯"、"帮我关灯"、"拜拜"等语音指令
+ * 3. 音频反馈播放 - 通过MAX98357A功放播放确认音频
+ * 4. LED灯控制 - 根据语音指令控制外接LED灯
  *
  * 硬件配置：
- * - ESP32-S3-DevKitC-1开发板
- * - INMP441数字麦克风
- * - 连接方式：VDD->3.3V, GND->GND, SD->GPIO6, WS->GPIO4, SCK->GPIO5
+ * - ESP32-S3-DevKitC-1开发板（需要PSRAM版本）
+ * - INMP441数字麦克风（音频输入）
+ *   连接方式：VDD->3.3V, GND->GND, SD->GPIO6, WS->GPIO4, SCK->GPIO5
+ * - MAX98357A数字功放（音频输出）
+ *   连接方式：DIN->GPIO7, BCLK->GPIO15, LRC->GPIO16, VIN->3.3V, GND->GND
+ * - 外接LED灯（GPIO21控制）
  *
  * 音频参数：
  * - 采样率：16kHz
  * - 声道：单声道(Mono)
  * - 位深度：16位
+ *
+ * 使用的AI模型：
+ * - 唤醒词检测：WakeNet9 "你好小智"模型
+ * - 命令词识别：MultiNet7中文命令词识别模型
  */
 
 extern "C"
@@ -23,19 +32,21 @@ extern "C"
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "esp_wn_iface.h"        // 唤醒词检测接口
-#include "esp_wn_models.h"       // 唤醒词模型管理
-#include "esp_mn_iface.h"        // 命令词识别接口
-#include "esp_mn_models.h"       // 命令词模型管理
+#include "esp_wn_iface.h"           // 唤醒词检测接口
+#include "esp_wn_models.h"          // 唤醒词模型管理
+#include "esp_mn_iface.h"           // 命令词识别接口
+#include "esp_mn_models.h"          // 命令词模型管理
 #include "esp_mn_speech_commands.h" // 命令词配置
-#include "model_path.h"          // 模型路径定义
-#include "bsp_board.h"           // 板级支持包，INMP441麦克风驱动
-#include "esp_log.h"             // ESP日志系统
-#include "mock_voices/welcome.h" // 欢迎音频数据文件
-#include "mock_voices/light_on.h"  // 开灯音频数据文件
-#include "mock_voices/light_off.h" // 关灯音频数据文件
-#include "mock_voices/byebye.h"    // 再见音频数据文件
-#include "driver/gpio.h"         // GPIO驱动
+#include "esp_process_sdkconfig.h"  // sdkconfig处理函数
+#include "model_path.h"             // 模型路径定义
+#include "bsp_board.h"              // 板级支持包，INMP441麦克风驱动
+#include "esp_log.h"                // ESP日志系统
+#include "mock_voices/welcome.h"    // 欢迎音频数据文件
+#include "mock_voices/light_on.h"   // 开灯音频数据文件
+#include "mock_voices/light_off.h"  // 关灯音频数据文件
+#include "mock_voices/byebye.h"     // 再见音频数据文件
+#include "mock_voices/custom.h"     // 安全屋状态音频数据文件
+#include "driver/gpio.h"            // GPIO驱动
 }
 
 static const char *TAG = "语音识别"; // 日志标签
@@ -44,15 +55,34 @@ static const char *TAG = "语音识别"; // 日志标签
 #define LED_GPIO GPIO_NUM_21 // 外接LED灯珠连接到GPIO21
 
 // 系统状态定义
-typedef enum {
-    STATE_WAITING_WAKEUP = 0,    // 等待唤醒词
-    STATE_WAITING_COMMAND = 1,   // 等待命令词
+typedef enum
+{
+    STATE_WAITING_WAKEUP = 0,  // 等待唤醒词
+    STATE_WAITING_COMMAND = 1, // 等待命令词
 } system_state_t;
 
 // 命令词ID定义（对应commands_cn.txt中的ID）
-#define COMMAND_TURN_OFF_LIGHT 308  // "帮我关灯"
-#define COMMAND_TURN_ON_LIGHT  309  // "帮我开灯"
-#define COMMAND_BYE_BYE        314  // "拜拜"
+#define COMMAND_TURN_OFF_LIGHT 308      // "帮我关灯"
+#define COMMAND_TURN_ON_LIGHT 309       // "帮我开灯"
+#define COMMAND_BYE_BYE 314             // "拜拜"
+#define COMMAND_SAFETY_HOUSE_STATUS 315 // "现在安全屋情况如何"
+
+// 命令词配置结构体
+typedef struct
+{
+    int command_id;
+    const char *pinyin;
+    const char *description;
+} command_config_t;
+
+// 自定义命令词列表
+static const command_config_t custom_commands[] = {
+    {COMMAND_TURN_ON_LIGHT, "bang wo kai deng", "帮我开灯"},
+    {COMMAND_TURN_OFF_LIGHT, "bang wo guan deng", "帮我关灯"},
+    {COMMAND_BYE_BYE, "bai bai", "拜拜"},
+    {COMMAND_SAFETY_HOUSE_STATUS, "xian zai an quan wu qing kuang ru he", "现在安全屋情况如何"}};
+
+#define CUSTOM_COMMANDS_COUNT (sizeof(custom_commands) / sizeof(custom_commands[0]))
 
 // 全局变量
 static system_state_t current_state = STATE_WAITING_WAKEUP;
@@ -104,6 +134,155 @@ static void led_turn_off(void)
 }
 
 /**
+ * @brief 配置自定义命令词
+ *
+ * 该函数会清除现有命令词，然后添加自定义命令词列表中的所有命令
+ *
+ * @param multinet 命令词识别接口指针
+ * @param mn_model_data 命令词模型数据指针
+ * @return esp_err_t
+ *         - ESP_OK: 配置成功
+ *         - ESP_FAIL: 配置失败
+ */
+static esp_err_t configure_custom_commands(esp_mn_iface_t *multinet, model_iface_data_t *mn_model_data)
+{
+    ESP_LOGI(TAG, "开始配置自定义命令词...");
+
+    // 首先尝试从sdkconfig加载默认命令词配置
+    esp_mn_commands_update_from_sdkconfig(multinet, mn_model_data);
+
+    // 清除现有命令词，重新开始
+    esp_mn_commands_clear();
+
+    // 分配命令词管理结构
+    esp_err_t ret = esp_mn_commands_alloc(multinet, mn_model_data);
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "命令词管理结构分配失败: %s", esp_err_to_name(ret));
+        return ESP_FAIL;
+    }
+
+    // 添加自定义命令词
+    int success_count = 0;
+    int fail_count = 0;
+
+    for (int i = 0; i < CUSTOM_COMMANDS_COUNT; i++)
+    {
+        const command_config_t *cmd = &custom_commands[i];
+
+        ESP_LOGI(TAG, "添加命令词 [%d]: %s (%s)",
+                 cmd->command_id, cmd->description, cmd->pinyin);
+
+        esp_err_t ret_cmd = esp_mn_commands_add(cmd->command_id, cmd->pinyin);
+        if (ret_cmd == ESP_OK)
+        {
+            success_count++;
+            ESP_LOGI(TAG, "✓ 命令词 [%d] 添加成功", cmd->command_id);
+        }
+        else
+        {
+            fail_count++;
+            ESP_LOGE(TAG, "✗ 命令词 [%d] 添加失败: %s",
+                     cmd->command_id, esp_err_to_name(ret_cmd));
+        }
+    }
+
+    // 更新命令词到模型
+    ESP_LOGI(TAG, "更新命令词到模型...");
+    esp_mn_error_t *error_phrases = esp_mn_commands_update();
+    if (error_phrases != NULL && error_phrases->num > 0)
+    {
+        ESP_LOGW(TAG, "有 %d 个命令词更新失败:", error_phrases->num);
+        for (int i = 0; i < error_phrases->num; i++)
+        {
+            ESP_LOGW(TAG, "  失败命令 %d: %s",
+                     error_phrases->phrases[i]->command_id,
+                     error_phrases->phrases[i]->string);
+        }
+    }
+
+    // 打印配置结果
+    ESP_LOGI(TAG, "命令词配置完成: 成功 %d 个, 失败 %d 个", success_count, fail_count);
+
+    // 打印激活的命令词
+    ESP_LOGI(TAG, "当前激活的命令词列表:");
+    multinet->print_active_speech_commands(mn_model_data);
+
+    // 打印支持的命令列表
+    ESP_LOGI(TAG, "支持的语音命令:");
+    for (int i = 0; i < CUSTOM_COMMANDS_COUNT; i++)
+    {
+        const command_config_t *cmd = &custom_commands[i];
+        ESP_LOGI(TAG, "  ID=%d: '%s'", cmd->command_id, cmd->description);
+    }
+
+    return (fail_count == 0) ? ESP_OK : ESP_FAIL;
+}
+
+/**
+ * @brief 添加单个自定义命令词
+ *
+ * 这是一个便捷函数，用于在运行时动态添加单个命令词
+ *
+ * @param command_id 命令ID
+ * @param pinyin 命令的拼音表示
+ * @param description 命令的中文描述（用于日志）
+ * @return esp_err_t
+ *         - ESP_OK: 添加成功
+ *         - ESP_FAIL: 添加失败
+ */
+static esp_err_t add_single_command(int command_id, const char *pinyin, const char *description)
+{
+    if (multinet == NULL || mn_model_data == NULL)
+    {
+        ESP_LOGE(TAG, "语音识别模型未初始化");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "添加命令词 [%d]: %s (%s)", command_id, description, pinyin);
+
+    esp_err_t ret = esp_mn_commands_add(command_id, pinyin);
+    if (ret == ESP_OK)
+    {
+        ESP_LOGI(TAG, "✓ 命令词 [%d] 添加成功", command_id);
+
+        // 更新命令词到模型
+        esp_mn_error_t *error_phrases = esp_mn_commands_update();
+        if (error_phrases != NULL && error_phrases->num > 0)
+        {
+            ESP_LOGW(TAG, "命令词更新时有错误");
+            return ESP_FAIL;
+        }
+
+        ESP_LOGI(TAG, "✓ 命令词 [%d] 已生效", command_id);
+        return ESP_OK;
+    }
+    else
+    {
+        ESP_LOGE(TAG, "✗ 命令词 [%d] 添加失败: %s", command_id, esp_err_to_name(ret));
+        return ESP_FAIL;
+    }
+}
+
+/**
+ * @brief 获取命令词的中文描述
+ *
+ * @param command_id 命令ID
+ * @return const char* 命令的中文描述，如果未找到返回"未知命令"
+ */
+static const char *get_command_description(int command_id)
+{
+    for (int i = 0; i < CUSTOM_COMMANDS_COUNT; i++)
+    {
+        if (custom_commands[i].command_id == command_id)
+        {
+            return custom_commands[i].description;
+        }
+    }
+    return "未知命令";
+}
+
+/**
  * @brief 执行退出逻辑
  *
  * 播放再见音频并返回等待唤醒状态
@@ -150,7 +329,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ INMP441麦克风初始化成功");
 
-    // ========== 第二步：初始化音频播放功能 ==========
+    // ========== 第三步：初始化音频播放功能 ==========
     ESP_LOGI(TAG, "正在初始化音频播放功能...");
     ESP_LOGI(TAG, "音频播放参数: 采样率16kHz, 单声道, 16位深度");
 
@@ -163,7 +342,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 音频播放初始化成功");
 
-    // ========== 第三步：初始化语音识别模型 ==========
+    // ========== 第四步：初始化语音识别模型 ==========
     ESP_LOGI(TAG, "正在初始化唤醒词检测模型...");
 
     // 检查内存状态
@@ -176,7 +355,8 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "  - 内部RAM: %zu KB", free_internal / 1024);
     ESP_LOGI(TAG, "  - PSRAM: %zu KB", free_spiram / 1024);
 
-    if (free_heap < 100 * 1024) {
+    if (free_heap < 100 * 1024)
+    {
         ESP_LOGE(TAG, "可用内存不足，需要至少100KB");
         return;
     }
@@ -189,17 +369,20 @@ extern "C" void app_main(void)
     int retry_count = 0;
     const int max_retries = 3;
 
-    while (models == NULL && retry_count < max_retries) {
+    while (models == NULL && retry_count < max_retries)
+    {
         ESP_LOGI(TAG, "尝试加载模型 (第%d次)...", retry_count + 1);
 
         // 在每次重试前等待一下
-        if (retry_count > 0) {
+        if (retry_count > 0)
+        {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
 
         models = esp_srmodel_init("model");
 
-        if (models == NULL) {
+        if (models == NULL)
+        {
             ESP_LOGW(TAG, "模型加载失败，准备重试...");
             retry_count++;
         }
@@ -240,15 +423,15 @@ extern "C" void app_main(void)
         return;
     }
 
-    // ========== 第四步：初始化命令词识别模型 ==========
+    // ========== 第五步：初始化命令词识别模型 ==========
     ESP_LOGI(TAG, "正在初始化命令词识别模型...");
 
-    // 获取中文命令词识别模型
+    // 获取中文命令词识别模型（MultiNet7）
     char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_CHINESE);
     if (mn_name == NULL)
     {
         ESP_LOGE(TAG, "未找到中文命令词识别模型！");
-        ESP_LOGE(TAG, "请确保已正确配置并烧录mn6_cn模型");
+        ESP_LOGE(TAG, "请确保已正确配置并烧录MultiNet7中文模型");
         return;
     }
 
@@ -270,22 +453,17 @@ extern "C" void app_main(void)
         return;
     }
 
-    // 尝试从sdkconfig加载命令词配置
+    // 配置自定义命令词
     ESP_LOGI(TAG, "正在配置命令词...");
-
-    // 尝试使用sdkconfig配置（如果函数存在）
-    // 注意：这个函数在某些ESP-IDF版本中可能不存在
-    // esp_mn_commands_update_from_sdkconfig(multinet, mn_model_data);
-
-    // 打印激活的命令词（这些命令词应该已经在sdkconfig中配置）
-    ESP_LOGI(TAG, "激活的命令词列表:");
-    multinet->print_active_speech_commands(mn_model_data);
-
+    esp_err_t cmd_config_ret = configure_custom_commands(multinet, mn_model_data);
+    if (cmd_config_ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "命令词配置失败");
+        return;
+    }
     ESP_LOGI(TAG, "✓ 命令词配置完成");
-    ESP_LOGI(TAG, "支持的命令: ID=%d('帮我开灯'), ID=%d('帮我关灯'), ID=%d('拜拜')",
-             COMMAND_TURN_ON_LIGHT, COMMAND_TURN_OFF_LIGHT, COMMAND_BYE_BYE);
 
-    // ========== 第四步：准备音频缓冲区 ==========
+    // ========== 第六步：准备音频缓冲区 ==========
     // 获取模型要求的音频数据块大小（样本数 × 每样本字节数）
     int audio_chunksize = wakenet->get_samp_chunksize(model_data) * sizeof(int16_t);
 
@@ -299,14 +477,15 @@ extern "C" void app_main(void)
     }
 
     // 显示系统配置信息
-    ESP_LOGI(TAG, "✓ 系统配置完成:");
+    ESP_LOGI(TAG, "✓ 智能语音助手系统配置完成:");
     ESP_LOGI(TAG, "  - 唤醒词模型: %s", model_name);
+    ESP_LOGI(TAG, "  - 命令词模型: %s", mn_name);
     ESP_LOGI(TAG, "  - 音频块大小: %d 字节", audio_chunksize);
     ESP_LOGI(TAG, "  - 检测置信度: 90%%");
-    ESP_LOGI(TAG, "正在启动麦克风唤醒词检测...");
-    ESP_LOGI(TAG, "请对着麦克风说出配置的唤醒词");
+    ESP_LOGI(TAG, "正在启动智能语音助手...");
+    ESP_LOGI(TAG, "请对着麦克风说出唤醒词 '你好小智'");
 
-    // ========== 第五步：主循环 - 实时音频采集与语音识别 ==========
+    // ========== 第七步：主循环 - 实时音频采集与语音识别 ==========
     ESP_LOGI(TAG, "系统启动完成，等待唤醒词 '你好小智'...");
 
     while (1)
@@ -366,8 +545,9 @@ extern "C" void app_main(void)
                     int command_id = mn_result->command_id[0];
                     float prob = mn_result->prob[0];
 
-                    ESP_LOGI(TAG, "🎯 检测到命令词: ID=%d, 置信度=%.2f, 内容=%s",
-                             command_id, prob, mn_result->string);
+                    const char *cmd_desc = get_command_description(command_id);
+                    ESP_LOGI(TAG, "🎯 检测到命令词: ID=%d, 置信度=%.2f, 内容=%s, 命令='%s'",
+                             command_id, prob, mn_result->string, cmd_desc);
 
                     // 处理具体命令
                     if (command_id == COMMAND_TURN_ON_LIGHT)
@@ -392,6 +572,17 @@ extern "C" void app_main(void)
                         if (audio_ret == ESP_OK)
                         {
                             ESP_LOGI(TAG, "✓ 关灯确认音频播放成功");
+                        }
+                    }
+                    else if (command_id == COMMAND_SAFETY_HOUSE_STATUS)
+                    {
+                        ESP_LOGI(TAG, "💡 执行安全屋状态命令");
+
+                        // 播放安全屋状态确认音频
+                        esp_err_t audio_ret = bsp_play_audio(custom, custom_len);
+                        if (audio_ret == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "✓ 安全屋状态确认音频播放成功");
                         }
                     }
                     else if (command_id == COMMAND_BYE_BYE)

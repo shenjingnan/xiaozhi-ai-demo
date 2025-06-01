@@ -1,0 +1,2 @@
+pypinyin>=0.47.0
+pypinyin-dict>=0.7.0
