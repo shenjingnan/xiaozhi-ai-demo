@@ -173,6 +173,7 @@ static esp_err_t configure_custom_commands(esp_mn_iface_t *multinet, model_iface
         ESP_LOGI(TAG, "添加命令词 [%d]: %s (%s)",
                  cmd->command_id, cmd->description, cmd->pinyin);
 
+        // 添加命令词
         esp_err_t ret_cmd = esp_mn_commands_add(cmd->command_id, cmd->pinyin);
         if (ret_cmd == ESP_OK)
         {
@@ -217,51 +218,6 @@ static esp_err_t configure_custom_commands(esp_mn_iface_t *multinet, model_iface
     }
 
     return (fail_count == 0) ? ESP_OK : ESP_FAIL;
-}
-
-/**
- * @brief 添加单个自定义命令词
- *
- * 这是一个便捷函数，用于在运行时动态添加单个命令词
- *
- * @param command_id 命令ID
- * @param pinyin 命令的拼音表示
- * @param description 命令的中文描述（用于日志）
- * @return esp_err_t
- *         - ESP_OK: 添加成功
- *         - ESP_FAIL: 添加失败
- */
-static esp_err_t add_single_command(int command_id, const char *pinyin, const char *description)
-{
-    if (multinet == NULL || mn_model_data == NULL)
-    {
-        ESP_LOGE(TAG, "语音识别模型未初始化");
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "添加命令词 [%d]: %s (%s)", command_id, description, pinyin);
-
-    esp_err_t ret = esp_mn_commands_add(command_id, pinyin);
-    if (ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "✓ 命令词 [%d] 添加成功", command_id);
-
-        // 更新命令词到模型
-        esp_mn_error_t *error_phrases = esp_mn_commands_update();
-        if (error_phrases != NULL && error_phrases->num > 0)
-        {
-            ESP_LOGW(TAG, "命令词更新时有错误");
-            return ESP_FAIL;
-        }
-
-        ESP_LOGI(TAG, "✓ 命令词 [%d] 已生效", command_id);
-        return ESP_OK;
-    }
-    else
-    {
-        ESP_LOGE(TAG, "✗ 命令词 [%d] 添加失败: %s", command_id, esp_err_to_name(ret));
-        return ESP_FAIL;
-    }
 }
 
 /**
