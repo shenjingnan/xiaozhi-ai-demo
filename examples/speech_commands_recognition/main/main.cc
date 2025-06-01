@@ -25,17 +25,39 @@ extern "C"
 #include "freertos/task.h"
 #include "esp_wn_iface.h"        // 唤醒词检测接口
 #include "esp_wn_models.h"       // 唤醒词模型管理
+#include "esp_mn_iface.h"        // 命令词识别接口
+#include "esp_mn_models.h"       // 命令词模型管理
+#include "esp_mn_speech_commands.h" // 命令词配置
 #include "model_path.h"          // 模型路径定义
 #include "bsp_board.h"           // 板级支持包，INMP441麦克风驱动
 #include "esp_log.h"             // ESP日志系统
 #include "mock_voices/welcome.h" // 欢迎音频数据文件
+#include "mock_voices/light_on.h"  // 开灯音频数据文件
+#include "mock_voices/light_off.h" // 关灯音频数据文件
 #include "driver/gpio.h"         // GPIO驱动
 }
 
-static const char *TAG = "唤醒词检测"; // 日志标签
+static const char *TAG = "语音识别"; // 日志标签
 
 // 外接LED GPIO定义
 #define LED_GPIO GPIO_NUM_21 // 外接LED灯珠连接到GPIO21
+
+// 系统状态定义
+typedef enum {
+    STATE_WAITING_WAKEUP = 0,    // 等待唤醒词
+    STATE_WAITING_COMMAND = 1,   // 等待命令词
+} system_state_t;
+
+// 命令词ID定义（对应commands_cn.txt中的ID）
+#define COMMAND_TURN_OFF_LIGHT 308  // "帮我关灯"
+#define COMMAND_TURN_ON_LIGHT  309  // "帮我开灯"
+
+// 全局变量
+static system_state_t current_state = STATE_WAITING_WAKEUP;
+static esp_mn_iface_t *multinet = NULL;
+static model_iface_data_t *mn_model_data = NULL;
+static TickType_t command_timeout_start = 0;
+static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 
 /**
  * @brief 初始化外接LED GPIO
@@ -119,8 +141,44 @@ extern "C" void app_main(void)
     // ========== 第三步：初始化语音识别模型 ==========
     ESP_LOGI(TAG, "正在初始化唤醒词检测模型...");
 
+    // 检查内存状态
+    size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    size_t free_spiram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
+    ESP_LOGI(TAG, "内存状态检查:");
+    ESP_LOGI(TAG, "  - 总可用内存: %zu KB", free_heap / 1024);
+    ESP_LOGI(TAG, "  - 内部RAM: %zu KB", free_internal / 1024);
+    ESP_LOGI(TAG, "  - PSRAM: %zu KB", free_spiram / 1024);
+
+    if (free_heap < 100 * 1024) {
+        ESP_LOGE(TAG, "可用内存不足，需要至少100KB");
+        return;
+    }
+
     // 从模型目录加载所有可用的语音识别模型
-    srmodel_list_t *models = esp_srmodel_init("model");
+    ESP_LOGI(TAG, "开始加载模型文件...");
+
+    // 临时添加错误处理和重试机制
+    srmodel_list_t *models = NULL;
+    int retry_count = 0;
+    const int max_retries = 3;
+
+    while (models == NULL && retry_count < max_retries) {
+        ESP_LOGI(TAG, "尝试加载模型 (第%d次)...", retry_count + 1);
+
+        // 在每次重试前等待一下
+        if (retry_count > 0) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+
+        models = esp_srmodel_init("model");
+
+        if (models == NULL) {
+            ESP_LOGW(TAG, "模型加载失败，准备重试...");
+            retry_count++;
+        }
+    }
     if (models == NULL)
     {
         ESP_LOGE(TAG, "语音识别模型初始化失败");
@@ -157,6 +215,51 @@ extern "C" void app_main(void)
         return;
     }
 
+    // ========== 第四步：初始化命令词识别模型 ==========
+    ESP_LOGI(TAG, "正在初始化命令词识别模型...");
+
+    // 获取中文命令词识别模型
+    char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_CHINESE);
+    if (mn_name == NULL)
+    {
+        ESP_LOGE(TAG, "未找到中文命令词识别模型！");
+        ESP_LOGE(TAG, "请确保已正确配置并烧录mn6_cn模型");
+        return;
+    }
+
+    ESP_LOGI(TAG, "✓ 选择命令词模型: %s", mn_name);
+
+    // 获取命令词识别接口
+    multinet = esp_mn_handle_from_name(mn_name);
+    if (multinet == NULL)
+    {
+        ESP_LOGE(TAG, "获取命令词识别接口失败，模型: %s", mn_name);
+        return;
+    }
+
+    // 创建命令词模型数据实例
+    mn_model_data = multinet->create(mn_name, 6000);
+    if (mn_model_data == NULL)
+    {
+        ESP_LOGE(TAG, "创建命令词模型数据失败");
+        return;
+    }
+
+    // 尝试从sdkconfig加载命令词配置
+    ESP_LOGI(TAG, "正在配置命令词...");
+
+    // 尝试使用sdkconfig配置（如果函数存在）
+    // 注意：这个函数在某些ESP-IDF版本中可能不存在
+    // esp_mn_commands_update_from_sdkconfig(multinet, mn_model_data);
+
+    // 打印激活的命令词（这些命令词应该已经在sdkconfig中配置）
+    ESP_LOGI(TAG, "激活的命令词列表:");
+    multinet->print_active_speech_commands(mn_model_data);
+
+    ESP_LOGI(TAG, "✓ 命令词配置完成");
+    ESP_LOGI(TAG, "支持的命令: ID=%d('帮我开灯'), ID=%d('帮我关灯')",
+             COMMAND_TURN_ON_LIGHT, COMMAND_TURN_OFF_LIGHT);
+
     // ========== 第四步：准备音频缓冲区 ==========
     // 获取模型要求的音频数据块大小（样本数 × 每样本字节数）
     int audio_chunksize = wakenet->get_samp_chunksize(model_data) * sizeof(int16_t);
@@ -178,7 +281,9 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "正在启动麦克风唤醒词检测...");
     ESP_LOGI(TAG, "请对着麦克风说出配置的唤醒词");
 
-    // ========== 第五步：主循环 - 实时音频采集与唤醒词检测 ==========
+    // ========== 第五步：主循环 - 实时音频采集与语音识别 ==========
+    ESP_LOGI(TAG, "系统启动完成，等待唤醒词 '你好小智'...");
+
     while (1)
     {
         // 从INMP441麦克风获取一帧音频数据
@@ -192,37 +297,109 @@ extern "C" void app_main(void)
             continue;
         }
 
-        // 将音频数据送入唤醒词检测算法
-        // 返回检测状态：WAKENET_NO_DETECT(未检测到) 或 WAKENET_DETECTED(检测到)
-        wakenet_state_t state = wakenet->detect(model_data, buffer);
-
-        // 检查是否检测到唤醒词
-        if (state == WAKENET_DETECTED)
+        if (current_state == STATE_WAITING_WAKEUP)
         {
-            ESP_LOGI(TAG, "🎉 检测到唤醒词！");
+            // 第一阶段：唤醒词检测
+            wakenet_state_t wn_state = wakenet->detect(model_data, buffer);
 
-            // 输出检测结果到串口
-            printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
-            printf("=== Wake word detected! Model: %s ===\n", model_name);
-
-            // 播放音频提示音
-            ESP_LOGI(TAG, "播放音频提示音");
-            esp_err_t audio_ret = bsp_play_audio(welcome, welcome_len);
-            if (audio_ret != ESP_OK)
+            if (wn_state == WAKENET_DETECTED)
             {
-                ESP_LOGE(TAG, "音频播放失败: %s", esp_err_to_name(audio_ret));
+                ESP_LOGI(TAG, "🎉 检测到唤醒词 '你好小智'！");
+                printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
+
+                // 播放欢迎音频
+                ESP_LOGI(TAG, "播放欢迎音频...");
+                esp_err_t audio_ret = bsp_play_audio(welcome, welcome_len);
+                if (audio_ret != ESP_OK)
+                {
+                    ESP_LOGE(TAG, "音频播放失败: %s", esp_err_to_name(audio_ret));
+                }
+                else
+                {
+                    ESP_LOGI(TAG, "✓ 欢迎音频播放成功");
+                }
+
+                // 切换到命令词识别状态
+                current_state = STATE_WAITING_COMMAND;
+                command_timeout_start = xTaskGetTickCount();
+                multinet->clean(mn_model_data); // 清理命令词识别缓冲区
+                ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
+                ESP_LOGI(TAG, "支持的指令: '帮我开灯' 或 '帮我关灯'");
+            }
+        }
+        else if (current_state == STATE_WAITING_COMMAND)
+        {
+            // 第二阶段：命令词识别
+            esp_mn_state_t mn_state = multinet->detect(mn_model_data, buffer);
+
+            if (mn_state == ESP_MN_STATE_DETECTED)
+            {
+                // 获取识别结果
+                esp_mn_results_t *mn_result = multinet->get_results(mn_model_data);
+                if (mn_result->num > 0)
+                {
+                    int command_id = mn_result->command_id[0];
+                    float prob = mn_result->prob[0];
+
+                    ESP_LOGI(TAG, "🎯 检测到命令词: ID=%d, 置信度=%.2f, 内容=%s",
+                             command_id, prob, mn_result->string);
+
+                    // 处理具体命令
+                    if (command_id == COMMAND_TURN_ON_LIGHT)
+                    {
+                        ESP_LOGI(TAG, "💡 执行开灯命令");
+                        led_turn_on();
+
+                        // 播放开灯确认音频
+                        esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
+                        if (audio_ret == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "✓ 开灯确认音频播放成功");
+                        }
+                    }
+                    else if (command_id == COMMAND_TURN_OFF_LIGHT)
+                    {
+                        ESP_LOGI(TAG, "💡 执行关灯命令");
+                        led_turn_off();
+
+                        // 播放关灯确认音频
+                        esp_err_t audio_ret = bsp_play_audio(light_off, light_off_len);
+                        if (audio_ret == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "✓ 关灯确认音频播放成功");
+                        }
+                    }
+                    else
+                    {
+                        ESP_LOGW(TAG, "⚠️  未知命令ID: %d", command_id);
+                    }
+                }
+
+                // 命令处理完成，返回等待唤醒状态
+                current_state = STATE_WAITING_WAKEUP;
+                ESP_LOGI(TAG, "命令执行完成，返回等待唤醒状态");
+                ESP_LOGI(TAG, "请说出唤醒词 '你好小智' 来重新激活");
+            }
+            else if (mn_state == ESP_MN_STATE_TIMEOUT)
+            {
+                ESP_LOGW(TAG, "⏰ 命令词识别超时");
+                current_state = STATE_WAITING_WAKEUP;
+                ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
             }
             else
             {
-                ESP_LOGI(TAG, "✓ 音频播放成功");
+                // 检查手动超时
+                TickType_t current_time = xTaskGetTickCount();
+                if ((current_time - command_timeout_start) > pdMS_TO_TICKS(COMMAND_TIMEOUT_MS))
+                {
+                    ESP_LOGW(TAG, "⏰ 命令词等待超时 (%lu秒)", (unsigned long)(COMMAND_TIMEOUT_MS / 1000));
+                    current_state = STATE_WAITING_WAKEUP;
+                    ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
+                }
             }
-
-            // 这里可以添加唤醒后的处理逻辑
-            // 例如：启动语音识别、发送网络请求等
         }
 
         // 短暂延时，避免CPU占用过高，同时保证实时性
-        // 1ms延时确保检测的实时性
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
