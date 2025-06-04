@@ -45,7 +45,7 @@ extern "C"
 #include "mock_voices/light_on.h"   // 开灯音频数据文件
 #include "mock_voices/light_off.h"  // 关灯音频数据文件
 #include "mock_voices/byebye.h"     // 再见音频数据文件
-#include "mock_voices/custom.h"     // 安全屋状态音频数据文件
+#include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
 }
 
@@ -62,10 +62,10 @@ typedef enum
 } system_state_t;
 
 // 命令词ID定义（对应commands_cn.txt中的ID）
-#define COMMAND_TURN_OFF_LIGHT 308      // "帮我关灯"
-#define COMMAND_TURN_ON_LIGHT 309       // "帮我开灯"
-#define COMMAND_BYE_BYE 314             // "拜拜"
-#define COMMAND_SAFETY_HOUSE_STATUS 315 // "现在安全屋情况如何"
+#define COMMAND_TURN_OFF_LIGHT 308 // "帮我关灯"
+#define COMMAND_TURN_ON_LIGHT 309  // "帮我开灯"
+#define COMMAND_BYE_BYE 314        // "拜拜"
+#define COMMAND_CUSTOM 315         // "自定义命令词"
 
 // 命令词配置结构体
 typedef struct
@@ -80,7 +80,8 @@ static const command_config_t custom_commands[] = {
     {COMMAND_TURN_ON_LIGHT, "bang wo kai deng", "帮我开灯"},
     {COMMAND_TURN_OFF_LIGHT, "bang wo guan deng", "帮我关灯"},
     {COMMAND_BYE_BYE, "bai bai", "拜拜"},
-    {COMMAND_SAFETY_HOUSE_STATUS, "xian zai an quan wu qing kuang ru he", "现在安全屋情况如何"}};
+    {COMMAND_CUSTOM, "xian zai an quan wu qing kuang ru he", "现在安全屋情况如何"},
+};
 
 #define CUSTOM_COMMANDS_COUNT (sizeof(custom_commands) / sizeof(custom_commands[0]))
 
@@ -530,15 +531,15 @@ extern "C" void app_main(void)
                             ESP_LOGI(TAG, "✓ 关灯确认音频播放成功");
                         }
                     }
-                    else if (command_id == COMMAND_SAFETY_HOUSE_STATUS)
+                    else if (command_id == COMMAND_CUSTOM)
                     {
-                        ESP_LOGI(TAG, "💡 执行安全屋状态命令");
+                        ESP_LOGI(TAG, "💡 执行自定义命令词");
 
-                        // 播放安全屋状态确认音频
+                        // 播放自定义确认音频
                         esp_err_t audio_ret = bsp_play_audio(custom, custom_len);
                         if (audio_ret == ESP_OK)
                         {
-                            ESP_LOGI(TAG, "✓ 安全屋状态确认音频播放成功");
+                            ESP_LOGI(TAG, "✓ 自定义确认音频播放成功");
                         }
                     }
                     else if (command_id == COMMAND_BYE_BYE)
