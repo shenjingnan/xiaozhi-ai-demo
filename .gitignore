@@ -5,3 +5,5 @@ sdkconfig
 sdkconfig.old
 .DS_Store
 __pycache__
+
+examples/use_llm/.env
