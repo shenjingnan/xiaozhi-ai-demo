@@ -1,0 +1,114 @@
+2025-06-07 12:18:45,309 - werkzeug - WARNING -  * Debugger is active!
+2025-06-07 12:18:45,315 - werkzeug - INFO -  * Debugger PIN: 438-282-343
+2025-06-07 12:18:58,429 - werkzeug - INFO -  * Detected change in '/Users/nemo/Documents/PlatformIO/Projects/xiaozhi-replica/examples/use_llm/server/server.py', reloading
+2025-06-07 12:18:58,701 - werkzeug - WARNING -  * Debugger is active!
+2025-06-07 12:18:58,706 - werkzeug - INFO -  * Debugger PIN: 438-282-343
+2025-06-07 12:44:16,919 - werkzeug - INFO - [31m[1mWARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.[0m
+ * Running on all addresses (0.0.0.0)
+ * Running on http://127.0.0.1:8080
+ * Running on http://192.168.31.206:8080
+2025-06-07 12:44:16,919 - werkzeug - INFO - [33mPress CTRL+C to quit[0m
+2025-06-07 12:44:16,921 - werkzeug - INFO -  * Restarting with stat
+2025-06-07 12:44:17,543 - werkzeug - WARNING -  * Debugger is active!
+2025-06-07 12:44:17,551 - werkzeug - INFO -  * Debugger PIN: 438-282-343
+2025-06-07 12:45:04,323 - werkzeug - INFO -  * Detected change in '/Users/nemo/Documents/PlatformIO/Projects/xiaozhi-replica/examples/use_llm/server/server.py', reloading
+2025-06-07 12:45:25,447 - werkzeug - INFO -  * Restarting with stat
+2025-06-07 12:45:26,153 - werkzeug - WARNING -  * Debugger is active!
+2025-06-07 12:45:26,160 - werkzeug - INFO -  * Debugger PIN: 438-282-343
+2025-06-07 12:45:26,177 - werkzeug - INFO - 127.0.0.1 - - [07/Jun/2025 12:45:26] "GET /health HTTP/1.1" 200 -
+2025-06-07 12:45:26,206 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-06-07 12:45:26,407 - dashscope - DEBUG - Receive task-started event
+2025-06-07 12:45:26,581 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:26,701 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:26,770 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:26,851 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:26,923 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:26,995 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:27,246 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:45:27,247 - dashscope - DEBUG - Receive task-finished event
+2025-06-07 12:45:27,248 - dashscope - DEBUG - {'output': {}}
+2025-06-07 12:45:53,590 - werkzeug - INFO -  * Detected change in '/Users/nemo/Documents/PlatformIO/Projects/xiaozhi-replica/examples/use_llm/server/server.py', reloading
+2025-06-07 12:45:54,941 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): dashscope.aliyuncs.com:443
+2025-06-07 12:45:55,646 - werkzeug - INFO -  * Restarting with stat
+2025-06-07 12:45:56,410 - werkzeug - WARNING -  * Debugger is active!
+2025-06-07 12:45:56,418 - werkzeug - INFO -  * Debugger PIN: 438-282-343
+2025-06-07 12:46:00,506 - werkzeug - INFO - 127.0.0.1 - - [07/Jun/2025 12:46:00] "GET /health HTTP/1.1" 200 -
+2025-06-07 12:46:00,539 - asyncio - DEBUG - Using selector: KqueueSelector
+2025-06-07 12:46:00,780 - dashscope - DEBUG - Receive task-started event
+2025-06-07 12:46:00,950 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,073 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,130 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,211 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,282 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,355 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,608 - dashscope - DEBUG - Receive result-generated event
+2025-06-07 12:46:01,610 - dashscope - DEBUG - Receive task-finished event
+2025-06-07 12:46:01,611 - dashscope - DEBUG - {'output': {}}
+2025-06-07 12:46:06,202 - urllib3.connectionpool - DEBUG - Starting new HTTPS connection (1): dashscope.aliyuncs.com:443
+2025-06-07 12:46:07,131 - urllib3.connectionpool - DEBUG - https://dashscope.aliyuncs.com:443 "POST /compatible-mode/v1/chat/completions HTTP/1.1" 200 None
+2025-06-07 12:46:07,139 - websocket - DEBUG - Connecting proxy...
+2025-06-07 12:46:07,279 - websocket - INFO - Websocket connected
+2025-06-07 12:46:07,349 - dashscope - DEBUG - >>>send {"header": {"action": "run-task", "task_id": "57bd06f9b6334ed28d86ea35b3cc53c7", "streaming": "duplex"}, "payload": {"model": "cosyvoice-v2", "task_group": "audio", "task": "tts", "function": "SpeechSynthesizer", "input": {"text": ""}, "parameters": {"voice": "longxiaochun_v2", "volume": 50, "text_type": "PlainText", "sample_rate": 0, "rate": 1.0, "format": "Default", "pitch": 1.0}}}
+2025-06-07 12:46:07,406 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"task-started","attributes":{}},"payload":{}}
+2025-06-07 12:46:07,408 - dashscope - DEBUG - >>>send {"header": {"action": "continue-task", "task_id": "57bd06f9b6334ed28d86ea35b3cc53c7", "streaming": "duplex"}, "payload": {"model": "cosyvoice-v2", "task_group": "audio", "task": "tts", "function": "SpeechSynthesizer", "input": {"text": "\u6211\u662f\u901a\u4e49\u5343\u95ee\uff0c\u963f\u91cc\u5df4\u5df4\u96c6\u56e2\u65d7\u4e0b\u7684\u8d85\u5927\u89c4\u6a21"}}}
+2025-06-07 12:46:07,408 - dashscope - DEBUG - >>>send {"header": {"action": "finish-task", "task_id": "57bd06f9b6334ed28d86ea35b3cc53c7", "streaming": "duplex"}, "payload": {"input": {"text": ""}}}
+2025-06-07 12:46:07,631 - dashscope - DEBUG - <<<recv binary 1716
+2025-06-07 12:46:07,632 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,633 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:07,633 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,634 - dashscope - DEBUG - <<<recv binary 1254
+2025-06-07 12:46:07,635 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,754 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:07,756 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,757 - dashscope - DEBUG - <<<recv binary 2925
+2025-06-07 12:46:07,758 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,759 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:07,760 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,760 - dashscope - DEBUG - <<<recv binary 418
+2025-06-07 12:46:07,762 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,899 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:07,900 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,901 - dashscope - DEBUG - <<<recv binary 2925
+2025-06-07 12:46:07,902 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,902 - dashscope - DEBUG - <<<recv binary 418
+2025-06-07 12:46:07,903 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:07,904 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}},"usage":{"characters":13}}}
+2025-06-07 12:46:08,066 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,067 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,069 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,070 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,070 - dashscope - DEBUG - <<<recv binary 1254
+2025-06-07 12:46:08,071 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,191 - dashscope - DEBUG - <<<recv binary 2925
+2025-06-07 12:46:08,194 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,195 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,197 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,198 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,198 - dashscope - DEBUG - <<<recv binary 418
+2025-06-07 12:46:08,199 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,201 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,317 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,318 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,321 - dashscope - DEBUG - <<<recv binary 2925
+2025-06-07 12:46:08,321 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,324 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,324 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,325 - dashscope - DEBUG - <<<recv binary 836
+2025-06-07 12:46:08,325 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,530 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,530 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,532 - dashscope - DEBUG - <<<recv binary 2925
+2025-06-07 12:46:08,533 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,535 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,536 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,538 - dashscope - DEBUG - <<<recv binary 2926
+2025-06-07 12:46:08,539 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,539 - dashscope - DEBUG - <<<recv binary 2090
+2025-06-07 12:46:08,542 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,542 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}},"usage":{"characters":39}}}
+2025-06-07 12:46:08,543 - dashscope - DEBUG - <<<recv binary 2089
+2025-06-07 12:46:08,544 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}}}}
+2025-06-07 12:46:08,544 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}},"usage":{"characters":39}}}
+2025-06-07 12:46:08,545 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"result-generated","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{"sentence":{"words":[]}},"usage":{"characters":39}}}
+2025-06-07 12:46:08,545 - dashscope - DEBUG - <<<recv {"header":{"task_id":"57bd06f9b6334ed28d86ea35b3cc53c7","event":"task-finished","attributes":{"request_uuid":"425c585d-292f-4fa8-a136-fb130ba55bc5","x-ds-batch-queue-length":"0"}},"payload":{"output":{}}}
+2025-06-07 12:46:08,588 - werkzeug - INFO - 127.0.0.1 - - [07/Jun/2025 12:46:08] "POST /process_audio HTTP/1.1" 200 -
