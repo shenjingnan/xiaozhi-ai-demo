@@ -13,6 +13,7 @@ import requests
 import logging
 import subprocess
 import tempfile
+import json
 from flask import Flask, request, jsonify, send_file
 from dotenv import load_dotenv
 import dashscope
@@ -41,6 +42,54 @@ dashscope.api_key = os.getenv("DASHSCOPE_API_KEY")
 # 千问API配置
 QWEN_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
 QWEN_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+
+# 模型配置
+TEXT_MODEL = os.getenv("TEXT_MODEL", default="qwen-plus")
+STT_MODEL = os.getenv("STT_MODEL", default="paraformer-realtime-v2")
+TTS_MODEL = os.getenv("TTS_MODEL", default="cosyvoice-v2")
+TTS_VOICE = os.getenv("TTS_VOICE", default="longxiaochun_v2")
+
+# 文件路径配置
+SYSTEM_PROMPT_PATH = os.path.join(
+    os.path.dirname(__file__), "prompts", "system_prompt.md"
+)
+MEMORIES_PATH = os.path.join(os.path.dirname(__file__), "prompts", "memories.md")
+
+
+def read_file_content(file_path):
+    """读取文件内容"""
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        logger.warning(f"文件不存在: {file_path}")
+        return ""
+    except Exception as e:
+        logger.error(f"读取文件失败 {file_path}: {str(e)}")
+        return ""
+
+
+def update_memories(new_memory):
+    """更新记忆文件"""
+    try:
+        # 读取现有记忆
+        existing_memories = read_file_content(MEMORIES_PATH)
+
+        # 添加新记忆
+        if existing_memories:
+            updated_memories = existing_memories + "\n\n" + new_memory
+        else:
+            updated_memories = new_memory
+
+        # 写入文件
+        with open(MEMORIES_PATH, "w", encoding="utf-8") as f:
+            f.write(updated_memories)
+
+        logger.info(f"记忆已更新: {new_memory}")
+
+    except Exception as e:
+        logger.error(f"更新记忆失败: {str(e)}")
+        raise e
 
 
 class STTCallback(RecognitionCallback):
@@ -141,7 +190,7 @@ def speech_to_text(audio_data):
 
         # 创建识别对象
         recognition = Recognition(
-            model="paraformer-realtime-v2",
+            model=STT_MODEL,
             format="wav",
             sample_rate=16000,
             language_hints=["zh", "en"],
@@ -178,38 +227,83 @@ def speech_to_text(audio_data):
 
 
 def text_inference(text):
-    """文本推理，生成回复（限制20字内）"""
+    """文本推理，生成回复并返回结构化数据"""
     try:
+        # 读取系统提示词和记忆
+        system_prompt = read_file_content(SYSTEM_PROMPT_PATH)
+        memories = read_file_content(MEMORIES_PATH)
+
         headers = {
             "Authorization": f"Bearer {QWEN_API_KEY}",
             "Content-Type": "application/json",
         }
 
-        data = {
-            "model": "qwen-plus",
-            "messages": [
+        # 构建消息列表
+        messages = [
+            {
+                "role": "system",
+                "content": system_prompt,
+            }
+        ]
+
+        # 如果有记忆内容，添加到assistant角色
+        if memories:
+            messages.append(
                 {
-                    "role": "system",
-                    "content": "你是一个智能助手。请用简洁的中文回答用户问题，回答内容控制在20个字以内。",
-                },
-                {"role": "user", "content": text},
-            ],
+                    "role": "assistant",
+                    "content": memories,
+                }
+            )
+
+        # 添加用户输入
+        messages.append({"role": "user", "content": text})
+
+        data = {
+            "model": TEXT_MODEL,
+            "messages": messages,
         }
 
         response = requests.post(QWEN_API_URL, headers=headers, json=data)
         response.raise_for_status()
 
         result = response.json()
-        response_text = result["choices"][0]["message"]["content"]
-
-        # # 确保回复不超过20个字
-        # if len(response_text) > 20:
-        #     response_text = response_text[:20]
+        response_content = result["choices"][0]["message"]["content"]
 
         print(f"[推理] 输入: {text}")
-        print(f"[推理] 输出: {response_text}")
+        print(f"[推理] 原始输出: {response_content}")
 
-        return response_text
+        # 尝试解析JSON响应
+        try:
+            # 处理可能的markdown格式JSON
+            json_content = response_content.strip()
+
+            # 移除markdown代码块标记
+            if json_content.startswith("```json"):
+                json_content = json_content[7:]  # 移除 ```json
+            elif json_content.startswith("```"):
+                json_content = json_content[3:]  # 移除 ```
+
+            if json_content.endswith("```"):
+                json_content = json_content[:-3]  # 移除结尾的 ```
+
+            json_content = json_content.strip()
+
+            parsed_response = json.loads(json_content)
+            if isinstance(parsed_response, dict) and "response_text" in parsed_response:
+                print(f"[推理] 解析后输出: {parsed_response}")
+                return parsed_response
+            else:
+                # 如果不是预期的JSON格式，返回默认格式
+                return {
+                    "response_text": response_content,
+                    "summary": f"用户说: {text}, 我回答: {response_content}",
+                }
+        except json.JSONDecodeError:
+            # 如果JSON解析失败，返回默认格式
+            return {
+                "response_text": response_content,
+                "summary": f"用户说: {text}, 我回答: {response_content}",
+            }
 
     except Exception as e:
         print(f"[推理] 文本推理失败: {str(e)}")
@@ -220,7 +314,7 @@ def text_to_speech(text):
     """文字转语音，返回PCM格式音频"""
     try:
         # 创建语音合成器
-        synthesizer = SpeechSynthesizer(model="cosyvoice-v2", voice="longxiaochun_v2")
+        synthesizer = SpeechSynthesizer(model=TTS_MODEL, voice=TTS_VOICE)
 
         # 合成语音（返回MP3格式）
         mp3_audio_data = synthesizer.call(text)
@@ -266,9 +360,18 @@ def process_audio():
 
         # 步骤2: 文本推理
         print("[API] 开始文本推理...")
-        response_text = text_inference(text)
+        inference_result = text_inference(text)
 
-        # 步骤3: 文字转语音
+        # 提取响应文本和摘要
+        response_text = inference_result.get("response_text", "")
+        summary = inference_result.get("summary", "")
+
+        # 步骤3: 更新记忆
+        if summary:
+            print("[API] 更新记忆...")
+            update_memories(summary)
+
+        # 步骤4: 文字转语音
         print("[API] 开始语音合成...")
         audio_response = text_to_speech(response_text)
 
