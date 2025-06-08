@@ -7,3 +7,5 @@ sdkconfig.old
 __pycache__
 
 examples/use_llm/server/.env
+examples/use_llm/server/debug.log
+examples/use_llm/server/response_audio.mp3
