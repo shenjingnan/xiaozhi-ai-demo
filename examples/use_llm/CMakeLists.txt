@@ -1,4 +1,4 @@
 cmake_minimum_required(VERSION 3.5)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(esp32_llm_assistant)
+project(wake_word_detection)

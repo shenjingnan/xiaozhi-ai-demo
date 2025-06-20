@@ -1,2 +1,0 @@
-websockets>=11.0
-pyaudio>=0.2.11

@@ -32,27 +32,16 @@
 #define I2S_SCK_PIN GPIO_NUM_5 // 串行时钟信号 (Serial Clock/Bit Clock) - 数据传输时钟
 #define I2S_SD_PIN GPIO_NUM_6  // 串行数据信号 (Serial Data) - 音频数据输出
 
-// MAX98357A I2S 输出引脚配置
-// MAX98357A 是一个数字音频功放，通过 I2S 接口接收音频数据
-#define I2S_OUT_BCLK_PIN GPIO_NUM_15 // 位时钟信号 (Bit Clock)
-#define I2S_OUT_LRC_PIN GPIO_NUM_16  // 左右声道时钟信号 (LR Clock)
-#define I2S_OUT_DIN_PIN GPIO_NUM_7   // 数据输入信号 (Data Input)
-
 // I2S 配置参数
-#define I2S_PORT_RX I2S_NUM_0 // 使用 I2S 端口 0 用于录音
-#define I2S_PORT_TX I2S_NUM_1 // 使用 I2S 端口 1 用于播放
-#define SAMPLE_RATE 16000     // 采样率 16kHz，适合语音识别
-#define BITS_PER_SAMPLE 16    // 每个采样点 16 位
-#define CHANNELS 1            // 单声道配置
+#define I2S_PORT I2S_NUM_0     // 使用 I2S 端口 0
+#define SAMPLE_RATE 16000      // 采样率 16kHz，适合语音识别
+#define BITS_PER_SAMPLE 16     // 每个采样点 16 位
+#define CHANNELS 1             // 单声道配置
 
 static const char *TAG = "bsp_board";
 
 // I2S 接收通道句柄，用于管理音频数据接收
 static i2s_chan_handle_t rx_handle = nullptr;
-// I2S 发送通道句柄，用于管理音频数据播放
-static i2s_chan_handle_t tx_handle = nullptr;
-// I2S 发送通道状态标志
-static bool tx_channel_enabled = false;
 
 /**
  * @brief 初始化 I2S 接口用于 INMP441 麦克风
@@ -73,10 +62,9 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
 
     // 创建 I2S 通道配置
     // 设置为主模式，ESP32-S3 作为时钟源
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT_RX, I2S_ROLE_MASTER);
+    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
     ret = i2s_new_channel(&chan_cfg, nullptr, &rx_handle);
-    if (ret != ESP_OK)
-    {
+    if (ret != ESP_OK) {
         ESP_LOGE(TAG, "创建 I2S 通道失败: %s", esp_err_to_name(ret));
         return ret;
     }
@@ -89,14 +77,16 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
         .clk_cfg = {
             .sample_rate_hz = sample_rate,
             .clk_src = I2S_CLK_SRC_DEFAULT,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_256},
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, I2S_SLOT_MODE_MONO), // 插槽配置
+            .ext_clk_freq_hz = 0,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_256
+        },
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, I2S_SLOT_MODE_MONO),  // 插槽配置
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED, // INMP441 不需要主时钟
-            .bclk = I2S_SCK_PIN,     // 位时钟引脚
-            .ws = I2S_WS_PIN,        // 字选择引脚
-            .dout = I2S_GPIO_UNUSED, // 不需要数据输出（仅录音）
-            .din = I2S_SD_PIN,       // 数据输入引脚
+            .mclk = I2S_GPIO_UNUSED,    // INMP441 不需要主时钟
+            .bclk = I2S_SCK_PIN,        // 位时钟引脚
+            .ws = I2S_WS_PIN,           // 字选择引脚
+            .dout = I2S_GPIO_UNUSED,    // 不需要数据输出（仅录音）
+            .din = I2S_SD_PIN,          // 数据输入引脚
             .invert_flags = {
                 .mclk_inv = false,
                 .bclk_inv = false,
@@ -112,16 +102,14 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
 
     // 初始化 I2S 标准模式
     ret = i2s_channel_init_std_mode(rx_handle, &std_cfg);
-    if (ret != ESP_OK)
-    {
+    if (ret != ESP_OK) {
         ESP_LOGE(TAG, "初始化 I2S 标准模式失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
     // 启用 I2S 通道开始接收数据
     ret = i2s_channel_enable(rx_handle);
-    if (ret != ESP_OK)
-    {
+    if (ret != ESP_OK) {
         ESP_LOGE(TAG, "启用 I2S 通道失败: %s", esp_err_to_name(ret));
         return ret;
     }
@@ -129,6 +117,8 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
     ESP_LOGI(TAG, "I2S 初始化成功");
     return ESP_OK;
 }
+
+
 
 /**
  * @brief 初始化开发板硬件
@@ -170,29 +160,25 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
     // 从 I2S 通道读取音频数据
     ret = i2s_channel_read(rx_handle, buffer, buffer_len, &bytes_read, portMAX_DELAY);
 
-    if (ret != ESP_OK)
-    {
+    if (ret != ESP_OK) {
         ESP_LOGE(TAG, "读取 I2S 数据失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
     // 检查读取的数据长度是否符合预期
-    if (bytes_read != buffer_len)
-    {
+    if (bytes_read != buffer_len) {
         ESP_LOGW(TAG, "预期读取 %d 字节，实际读取 %d 字节", buffer_len, bytes_read);
     }
 
     // INMP441 特定的数据处理
     // INMP441 输出 24 位数据在 32 位帧中，左对齐
     // 我们需要提取最高有效的 16 位用于 16 位音频处理
-    if (!is_get_raw_channel)
-    {
+    if (!is_get_raw_channel) {
         int samples = buffer_len / sizeof(int16_t);
 
         // 对 INMP441 的数据进行处理
         // 麦克风输出左对齐数据，进行信号电平调整
-        for (int i = 0; i < samples; i++)
-        {
+        for (int i = 0; i < samples; i++) {
             // 当前使用原始信号电平（无增益）
             // 测试表明原始电平已足够满足唤醒词检测需求
             int32_t sample = static_cast<int32_t>(buffer[i]);
@@ -202,12 +188,10 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
             // sample = sample * 2;
 
             // 限制在 16 位有符号整数范围内
-            if (sample > 32767)
-            {
+            if (sample > 32767) {
                 sample = 32767;
             }
-            if (sample < -32768)
-            {
+            if (sample < -32768) {
                 sample = -32768;
             }
 
@@ -226,185 +210,4 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
 int bsp_get_feed_channel(void)
 {
     return CHANNELS;
-}
-
-/**
- * @brief 初始化 I2S 输出接口用于 MAX98357A 功放
- *
- * MAX98357A 是一个数字音频功放，需要特定的 I2S 配置：
- * - 使用标准 I2S 协议 (Philips 格式)
- * - 单声道或立体声模式
- * - 16 位数据宽度
- *
- * @param sample_rate 采样率 (Hz)
- * @param channel_format 声道数 (1=单声道, 2=立体声)
- * @param bits_per_chan 每个采样点的位数 (16 或 32)
- * @return esp_err_t 初始化结果
- */
-esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_chan)
-{
-    esp_err_t ret = ESP_OK;
-
-    // 创建 I2S 发送通道配置
-    // 设置为主模式，ESP32-S3 作为时钟源
-    i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT_TX, I2S_ROLE_MASTER);
-    ret = i2s_new_channel(&chan_cfg, &tx_handle, nullptr);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "创建 I2S 发送通道失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 确定正确的数据位宽度枚举值
-    i2s_data_bit_width_t bit_width = (bits_per_chan == 32) ? I2S_DATA_BIT_WIDTH_32BIT : I2S_DATA_BIT_WIDTH_16BIT;
-
-    // 配置 I2S 标准模式，专门针对 MAX98357A 优化
-    i2s_std_config_t std_cfg = {
-        .clk_cfg = {
-            .sample_rate_hz = sample_rate,
-            .clk_src = I2S_CLK_SRC_DEFAULT,
-            .mclk_multiple = I2S_MCLK_MULTIPLE_256,
-        },
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, I2S_SLOT_MODE_MONO),
-        .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,  // MAX98357A 不需要主时钟
-            .bclk = I2S_OUT_BCLK_PIN, // 位时钟引脚
-            .ws = I2S_OUT_LRC_PIN,    // 字选择引脚
-            .dout = I2S_OUT_DIN_PIN,  // 数据输出引脚
-            .din = I2S_GPIO_UNUSED,   // 不需要数据输入（仅播放）
-            .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
-            },
-        },
-    };
-
-    // 初始化 I2S 标准模式
-    ret = i2s_channel_init_std_mode(tx_handle, &std_cfg);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "初始化 I2S 发送标准模式失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 启用 I2S 发送通道开始播放数据
-    ret = i2s_channel_enable(tx_handle);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "启用 I2S 发送通道失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 设置通道状态标志
-    tx_channel_enabled = true;
-
-    ESP_LOGI(TAG, "I2S 音频播放初始化成功");
-    return ESP_OK;
-}
-
-/**
- * @brief 通过 I2S 播放音频数据
- *
- * 这个函数将音频数据发送到 MAX98357A 功放进行播放：
- * 1. 将音频数据写入 I2S 发送通道
- * 2. 确保数据完全发送
- *
- * @param audio_data 指向音频数据的指针
- * @param data_len 音频数据长度（字节）
- * @return esp_err_t 播放结果
- */
-esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
-{
-    esp_err_t ret = ESP_OK;
-    size_t bytes_written = 0;
-
-    if (tx_handle == nullptr)
-    {
-        ESP_LOGE(TAG, "I2S 发送通道未初始化");
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    if (audio_data == nullptr || data_len == 0)
-    {
-        ESP_LOGE(TAG, "无效的音频数据");
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    // 确保 I2S 发送通道已启用（如果之前被停止了）
-    if (!tx_channel_enabled)
-    {
-        ret = i2s_channel_enable(tx_handle);
-        if (ret != ESP_OK)
-        {
-            ESP_LOGE(TAG, "启用 I2S 发送通道失败: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        tx_channel_enabled = true;
-        ESP_LOGD(TAG, "I2S 发送通道已重新启用");
-    }
-
-    // 将音频数据写入 I2S 发送通道
-    ret = i2s_channel_write(tx_handle, audio_data, data_len, &bytes_written, portMAX_DELAY);
-
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "写入 I2S 音频数据失败: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    // 检查写入的数据长度是否符合预期
-    if (bytes_written != data_len)
-    {
-        ESP_LOGW(TAG, "预期写入 %d 字节，实际写入 %d 字节", data_len, bytes_written);
-    }
-
-    // 播放完成后停止I2S输出以防止噪音
-    esp_err_t stop_ret = bsp_audio_stop();
-    if (stop_ret != ESP_OK)
-    {
-        ESP_LOGW(TAG, "停止音频输出时出现警告: %s", esp_err_to_name(stop_ret));
-    }
-
-    ESP_LOGI(TAG, "音频播放完成，播放了 %d 字节", bytes_written);
-    return ESP_OK;
-}
-
-/**
- * @brief 停止 I2S 音频输出以防止噪音
- *
- * 这个函数会暂时禁用 I2S 发送通道，停止向 MAX98357A 发送数据，
- * 从而消除播放完成后的噪音。当需要再次播放音频时，
- * 可以重新启用通道。
- *
- * @return esp_err_t 停止结果
- */
-esp_err_t bsp_audio_stop(void)
-{
-    esp_err_t ret = ESP_OK;
-
-    if (tx_handle == nullptr)
-    {
-        ESP_LOGW(TAG, "I2S 发送通道未初始化，无需停止");
-        return ESP_OK;
-    }
-
-    // 只有在通道启用时才禁用它
-    if (tx_channel_enabled)
-    {
-        ret = i2s_channel_disable(tx_handle);
-        if (ret != ESP_OK)
-        {
-            ESP_LOGE(TAG, "禁用 I2S 发送通道失败: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        tx_channel_enabled = false;
-        ESP_LOGI(TAG, "I2S 音频输出已停止");
-    }
-    else
-    {
-        ESP_LOGD(TAG, "I2S 发送通道已经是禁用状态");
-    }
-
-    return ESP_OK;
 }

@@ -57,37 +57,7 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
  */
 int bsp_get_feed_channel(void);
 
-/**
- * @brief Initialize I2S output for audio playback
- *
- * @param sample_rate Sample rate in Hz (e.g., 16000)
- * @param channel_format Number of channels (1 for mono, 2 for stereo)
- * @param bits_per_chan Bits per sample (16 or 32)
- * @return
- *    - ESP_OK: Success
- *    - Others: Fail
- */
-esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_chan);
 
-/**
- * @brief Play audio data through I2S output
- *
- * @param audio_data Pointer to audio data buffer
- * @param data_len Length of audio data in bytes
- * @return
- *    - ESP_OK: Success
- *    - Others: Fail
- */
-esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len);
-
-/**
- * @brief Stop I2S audio output to prevent noise
- *
- * @return
- *    - ESP_OK: Success
- *    - Others: Fail
- */
-esp_err_t bsp_audio_stop(void);
 
 #ifdef __cplusplus
 }
