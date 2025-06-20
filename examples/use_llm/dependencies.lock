@@ -44,5 +44,5 @@ dependencies:
 direct_dependencies:
 - espressif/esp-sr
 manifest_hash: 77fd5cd68aa255df5d15d7d3288b423e5fc61c356be0b1f6cdb641823e0eceac
-target: esp32s3
+target: esp32
 version: 2.0.0
