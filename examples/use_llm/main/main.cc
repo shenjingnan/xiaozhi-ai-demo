@@ -29,6 +29,7 @@ extern "C"
 #include "bsp_board.h"     // 板级支持包，INMP441麦克风驱动
 #include "esp_log.h"       // ESP日志系统
 #include "driver/gpio.h"   // GPIO驱动
+#include "esp_timer.h"     // ESP定时器，用于获取时间戳
 }
 
 static const char *TAG = "唤醒词检测"; // 日志标签
@@ -202,6 +203,17 @@ extern "C" void app_main(void)
             // 输出检测结果到串口
             printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
             printf("=== Wake word detected! Model: %s ===\n", model_name);
+            
+            // 发送特定格式的消息给电脑端Python脚本
+            printf("唤醒词检测成功\n");
+            
+            // 也可以发送JSON格式的详细信息
+            printf("{\"event\":\"wake_word_detected\",\"model\":\"%s\",\"timestamp\":%lld}\n", 
+                   model_name, 
+                   (long long)esp_timer_get_time() / 1000); // 转换为毫秒时间戳
+            
+            // 确保消息立即发送
+            fflush(stdout);
 
             // 控制外接LED闪烁3次，每次点亮500ms，间隔200ms
             ESP_LOGI(TAG, "💡 点亮外接LED指示唤醒词检测成功");
