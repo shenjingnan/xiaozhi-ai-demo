@@ -33,6 +33,8 @@ extern "C"
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/base64.h" // Base64编码库
+#include "esp_timer.h"      // ESP定时器，用于获取时间戳
 #include "esp_wn_iface.h"           // 唤醒词检测接口
 #include "esp_wn_models.h"          // 唤醒词模型管理
 #include "esp_mn_iface.h"           // 命令词识别接口
@@ -248,6 +250,94 @@ static const char *get_command_description(int command_id)
         }
     }
     return "未知命令";
+}
+
+/**
+ * @brief 发送音频数据到串口
+ *
+ * 将PCM音频数据编码为Base64并通过JSON格式发送
+ * 
+ * @param audio_data 音频数据缓冲区
+ * @param data_size 音频数据大小（字节）
+ * @param sequence 数据包序号
+ */
+static void send_audio_data(const int16_t *audio_data, size_t data_size, uint32_t sequence)
+{
+    // Base64编码后的大小计算：(input_size + 2) / 3 * 4
+    size_t base64_size = ((data_size + 2) / 3) * 4 + 1; // +1 for null terminator
+    char *base64_buffer = (char *)malloc(base64_size);
+    
+    if (base64_buffer == NULL)
+    {
+        ESP_LOGE(TAG, "无法分配Base64缓冲区内存");
+        return;
+    }
+    
+    // 进行Base64编码
+    size_t output_len = 0;
+    int ret = mbedtls_base64_encode((unsigned char *)base64_buffer, base64_size,
+                                     &output_len, (const unsigned char *)audio_data, data_size);
+    
+    if (ret == 0)
+    {
+        // 发送JSON格式的音频数据包
+        printf("{\"event\":\"audio_data\",\"sequence\":%lu,\"size\":%zu,\"data\":\"%s\"}\n", 
+               (unsigned long)sequence, data_size, base64_buffer);
+        fflush(stdout);
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Base64编码失败: %d", ret);
+    }
+    
+    free(base64_buffer);
+}
+
+/**
+ * @brief 发送录音缓冲区的所有音频数据
+ *
+ * 将录音缓冲区分块发送，每块最大4KB
+ */
+static void send_recorded_audio(void)
+{
+    if (recording_buffer == NULL || recording_length == 0)
+    {
+        ESP_LOGW(TAG, "没有录音数据可发送");
+        return;
+    }
+    
+    const size_t chunk_size = 4096; // 每个数据包最大4KB
+    const size_t chunk_samples = chunk_size / sizeof(int16_t);
+    size_t sent_samples = 0;
+    uint32_t sequence = 0;
+    
+    ESP_LOGI(TAG, "开始发送录音数据，总大小: %zu 样本", recording_length);
+    
+    // 发送开始录音事件
+    printf("{\"event\":\"recording_started\",\"timestamp\":%lld}\n", 
+           (long long)esp_timer_get_time() / 1000);
+    fflush(stdout);
+    
+    // 分块发送音频数据
+    while (sent_samples < recording_length)
+    {
+        size_t samples_to_send = (recording_length - sent_samples > chunk_samples) 
+                                ? chunk_samples : (recording_length - sent_samples);
+        size_t bytes_to_send = samples_to_send * sizeof(int16_t);
+        
+        send_audio_data(&recording_buffer[sent_samples], bytes_to_send, sequence++);
+        sent_samples += samples_to_send;
+        
+        // 短暂延时，避免数据发送过快
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    
+    // 发送结束录音事件
+    printf("{\"event\":\"recording_stopped\",\"timestamp\":%lld}\n", 
+           (long long)esp_timer_get_time() / 1000);
+    fflush(stdout);
+    
+    ESP_LOGI(TAG, "✅ 录音数据发送完成，共 %lu 个数据包", (unsigned long)sequence);
 }
 
 /**
@@ -492,8 +582,11 @@ extern "C" void app_main(void)
         esp_err_t ret = bsp_get_feed_data(false, buffer, audio_chunksize);
         if (ret != ESP_OK)
         {
+            // 仅在调试模式下输出错误日志
+            #ifdef DEBUG_MODE
             ESP_LOGE(TAG, "麦克风音频数据获取失败: %s", esp_err_to_name(ret));
             ESP_LOGE(TAG, "请检查INMP441硬件连接");
+            #endif
             vTaskDelay(pdMS_TO_TICKS(10)); // 等待10ms后重试
             continue;
         }
@@ -507,6 +600,12 @@ extern "C" void app_main(void)
             {
                 ESP_LOGI(TAG, "🎉 检测到唤醒词 '你好小智'！");
                 printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
+                
+                // 发送唤醒词检测事件
+                printf("{\"event\":\"wake_word_detected\",\"model\":\"%s\",\"timestamp\":%lld}\n", 
+                       model_name, 
+                       (long long)esp_timer_get_time() / 1000);
+                fflush(stdout);
 
                 // 播放欢迎音频
                 ESP_LOGI(TAG, "播放欢迎音频...");
@@ -548,6 +647,10 @@ extern "C" void app_main(void)
                         ESP_LOGI(TAG, "检测到用户说话结束，录音长度: %zu 样本", recording_length);
                         is_recording = false;
 
+                        // 发送录音数据到Python脚本
+                        ESP_LOGI(TAG, "正在发送录音数据到电脑...");
+                        send_recorded_audio();
+
                         // 播放录制的音频
                         ESP_LOGI(TAG, "正在播放您刚才说的话...");
                         size_t audio_bytes = recording_length * sizeof(int16_t);
@@ -580,6 +683,10 @@ extern "C" void app_main(void)
                 // 录音缓冲区满了，强制停止录音
                 ESP_LOGW(TAG, "录音缓冲区已满，停止录音");
                 is_recording = false;
+                
+                // 发送录音数据到Python脚本
+                ESP_LOGI(TAG, "正在发送录音数据到电脑...");
+                send_recorded_audio();
                 
                 // 播放录制的音频
                 ESP_LOGI(TAG, "正在播放您刚才说的话...");
