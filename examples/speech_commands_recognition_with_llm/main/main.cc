@@ -145,6 +145,12 @@ static int16_t *response_buffer = NULL;
 static size_t response_length = 0;
 static bool response_played = false; // 标记响应音频是否已播放
 
+// 连续对话相关变量
+static bool is_continuous_conversation = false;  // 是否处于连续对话模式
+static TickType_t recording_timeout_start = 0;  // 录音超时计时开始时间
+#define RECORDING_TIMEOUT_MS 10000  // 录音超时时间（10秒）
+static bool user_started_speaking = false;  // 标记用户是否已经开始说话
+
 // WiFi重试计数
 static int s_retry_num = 0;
 
@@ -702,7 +708,15 @@ static void execute_exit_logic(void)
     // 断开WebSocket连接
     websocket_disconnect();
 
+    // 重置所有状态
     current_state = STATE_WAITING_WAKEUP;
+    is_recording = false;
+    is_continuous_conversation = false;
+    user_started_speaking = false;
+    recording_timeout_start = 0;
+    vad_speech_detected = false;
+    vad_silence_frames = 0;
+    
     ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
 }
 
@@ -997,8 +1011,13 @@ extern "C" void app_main(void)
                 recording_length = 0;
                 vad_speech_detected = false;
                 vad_silence_frames = 0;
+                is_continuous_conversation = false;  // 第一次录音，不是连续对话
+                user_started_speaking = false;
+                recording_timeout_start = 0;  // 第一次录音不需要超时
                 // 重置VAD触发器状态
                 vad_reset_trigger(vad_inst);
+                // 重置命令词识别缓冲区
+                multinet->clean(mn_model_data);
                 ESP_LOGI(TAG, "开始录音，请说话...");
             }
         }
@@ -1012,6 +1031,87 @@ extern "C" void app_main(void)
                 memcpy(&recording_buffer[recording_length], buffer, audio_chunksize);
                 recording_length += samples;
                 
+                // 如果是连续对话模式，同时进行命令词检测
+                if (is_continuous_conversation)
+                {
+                    esp_mn_state_t mn_state = multinet->detect(mn_model_data, buffer);
+                    if (mn_state == ESP_MN_STATE_DETECTED)
+                    {
+                        // 获取识别结果
+                        esp_mn_results_t *mn_result = multinet->get_results(mn_model_data);
+                        if (mn_result->num > 0)
+                        {
+                            int command_id = mn_result->command_id[0];
+                            float prob = mn_result->prob[0];
+                            const char *cmd_desc = get_command_description(command_id);
+                            
+                            ESP_LOGI(TAG, "🎯 在录音中检测到命令词: ID=%d, 置信度=%.2f, 内容=%s, 命令='%s'",
+                                     command_id, prob, mn_result->string, cmd_desc);
+                            
+                            // 停止录音
+                            is_recording = false;
+                            
+                            // 直接处理命令，不发送到服务器
+                            if (command_id == COMMAND_TURN_ON_LIGHT)
+                            {
+                                ESP_LOGI(TAG, "💡 执行开灯命令");
+                                led_turn_on();
+                                play_audio_with_stop(light_on, light_on_len, "开灯确认音频");
+                                // 继续保持连续对话模式
+                                is_recording = true;
+                                recording_length = 0;
+                                vad_speech_detected = false;
+                                vad_silence_frames = 0;
+                                user_started_speaking = false;
+                                recording_timeout_start = xTaskGetTickCount();
+                                vad_reset_trigger(vad_inst);
+                                multinet->clean(mn_model_data);
+                                ESP_LOGI(TAG, "命令执行完成，继续录音...");
+                                continue;
+                            }
+                            else if (command_id == COMMAND_TURN_OFF_LIGHT)
+                            {
+                                ESP_LOGI(TAG, "💡 执行关灯命令");
+                                led_turn_off();
+                                play_audio_with_stop(light_off, light_off_len, "关灯确认音频");
+                                // 继续保持连续对话模式
+                                is_recording = true;
+                                recording_length = 0;
+                                vad_speech_detected = false;
+                                vad_silence_frames = 0;
+                                user_started_speaking = false;
+                                recording_timeout_start = xTaskGetTickCount();
+                                vad_reset_trigger(vad_inst);
+                                multinet->clean(mn_model_data);
+                                ESP_LOGI(TAG, "命令执行完成，继续录音...");
+                                continue;
+                            }
+                            else if (command_id == COMMAND_BYE_BYE)
+                            {
+                                ESP_LOGI(TAG, "👋 检测到拜拜命令，退出对话");
+                                execute_exit_logic();
+                                continue;
+                            }
+                            else if (command_id == COMMAND_CUSTOM)
+                            {
+                                ESP_LOGI(TAG, "💡 执行自定义命令词");
+                                play_audio_with_stop(custom, custom_len, "自定义确认音频");
+                                // 继续保持连续对话模式
+                                is_recording = true;
+                                recording_length = 0;
+                                vad_speech_detected = false;
+                                vad_silence_frames = 0;
+                                user_started_speaking = false;
+                                recording_timeout_start = xTaskGetTickCount();
+                                vad_reset_trigger(vad_inst);
+                                multinet->clean(mn_model_data);
+                                ESP_LOGI(TAG, "命令执行完成，继续录音...");
+                                continue;
+                            }
+                        }
+                    }
+                }
+                
                 // 使用VAD检测语音活动（使用30ms帧长度）
                 vad_state_t vad_state = vad_process(vad_inst, buffer, SAMPLE_RATE, 30);
                 
@@ -1019,6 +1119,8 @@ extern "C" void app_main(void)
                 if (vad_state == VAD_SPEECH) {
                     vad_speech_detected = true;
                     vad_silence_frames = 0;
+                    user_started_speaking = true;  // 标记用户已经开始说话
+                    recording_timeout_start = 0;  // 用户说话后取消超时
                     // 显示录音进度（每100ms显示一次）
                     static TickType_t last_log_time = 0;
                     TickType_t current_time = xTaskGetTickCount();
@@ -1035,14 +1137,34 @@ extern "C" void app_main(void)
                                  recording_length, (float)recording_length / SAMPLE_RATE);
                         is_recording = false;
 
-                        // 发送录音数据到Python脚本
-                        ESP_LOGI(TAG, "正在发送录音数据到电脑...");
-                        send_recorded_audio();
+                        // 只有在用户确实说话了才发送数据
+                        if (user_started_speaking && recording_length > SAMPLE_RATE / 4) // 至少0.25秒的音频
+                        {
+                            // 发送录音数据到Python脚本
+                            ESP_LOGI(TAG, "正在发送录音数据到电脑...");
+                            send_recorded_audio();
 
-                        // 切换到等待响应状态
-                        current_state = STATE_WAITING_RESPONSE;
-                        response_played = false; // 重置播放标志
-                        ESP_LOGI(TAG, "等待服务器响应音频...");
+                            // 切换到等待响应状态
+                            current_state = STATE_WAITING_RESPONSE;
+                            response_played = false; // 重置播放标志
+                            ESP_LOGI(TAG, "等待服务器响应音频...");
+                        }
+                        else
+                        {
+                            ESP_LOGI(TAG, "录音时间过短或用户未说话，重新开始录音");
+                            // 重新开始录音
+                            is_recording = true;
+                            recording_length = 0;
+                            vad_speech_detected = false;
+                            vad_silence_frames = 0;
+                            user_started_speaking = false;
+                            if (is_continuous_conversation)
+                            {
+                                recording_timeout_start = xTaskGetTickCount();
+                            }
+                            vad_reset_trigger(vad_inst);
+                            multinet->clean(mn_model_data);
+                        }
                     }
                 }
             }
@@ -1061,6 +1183,29 @@ extern "C" void app_main(void)
                 response_played = false; // 重置播放标志
                 ESP_LOGI(TAG, "等待服务器响应音频...");
             }
+            
+            // 检查连续对话模式下的超时
+            if (is_continuous_conversation && recording_timeout_start > 0 && !user_started_speaking)
+            {
+                TickType_t current_time = xTaskGetTickCount();
+                if ((current_time - recording_timeout_start) > pdMS_TO_TICKS(RECORDING_TIMEOUT_MS))
+                {
+                    ESP_LOGW(TAG, "⏰ 连续对话录音超时，用户未说话");
+                    is_recording = false;
+                    execute_exit_logic();
+                }
+                // 每秒提示一次剩余时间
+                static TickType_t last_timeout_log = 0;
+                if (current_time - last_timeout_log > pdMS_TO_TICKS(1000))
+                {
+                    int remaining_seconds = (RECORDING_TIMEOUT_MS - (current_time - recording_timeout_start) * portTICK_PERIOD_MS) / 1000;
+                    if (remaining_seconds > 0)
+                    {
+                        ESP_LOGI(TAG, "等待用户说话... 剩余 %d 秒", remaining_seconds);
+                    }
+                    last_timeout_log = current_time;
+                }
+            }
         }
         else if (current_state == STATE_WAITING_RESPONSE)
         {
@@ -1070,13 +1215,22 @@ extern "C" void app_main(void)
             // 检查是否已经播放完成
             if (response_played)
             {
-                // 响应已播放完成，切换到命令词识别状态
-                current_state = STATE_WAITING_COMMAND;
-                command_timeout_start = xTaskGetTickCount();
-                multinet->clean(mn_model_data);
+                // 响应已播放完成，重新进入录音状态（连续对话）
+                current_state = STATE_RECORDING;
+                is_recording = true;
+                recording_length = 0;
+                vad_speech_detected = false;
+                vad_silence_frames = 0;
+                is_continuous_conversation = true;  // 标记为连续对话模式
+                user_started_speaking = false;
+                recording_timeout_start = xTaskGetTickCount();  // 开始超时计时
                 response_played = false; // 重置标志
-                ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
-                ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
+                // 重置VAD触发器状态
+                vad_reset_trigger(vad_inst);
+                // 重置命令词识别缓冲区
+                multinet->clean(mn_model_data);
+                ESP_LOGI(TAG, "进入连续对话模式，请继续说话（%d秒内）...", RECORDING_TIMEOUT_MS / 1000);
+                ESP_LOGI(TAG, "您可以：1) 继续对话 2) 说出命令词 3) 说'拜拜'退出");
             }
         }
         else if (current_state == STATE_WAITING_COMMAND)
