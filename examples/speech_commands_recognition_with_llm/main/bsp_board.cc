@@ -413,19 +413,20 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
         }
     }
 
-    // 计算预期的播放时间（仅用于日志显示）
-    uint32_t play_time_ms = (data_len / 2) * 1000 / SAMPLE_RATE;
-    ESP_LOGI(TAG, "音频数据已发送到I2S，预计播放时间: %.2f 秒", play_time_ms / 1000.0f);
-    
-    // 注意：不在这里停止I2S或等待，让调用者根据需要控制播放时长
-
     if (total_written != data_len)
     {
         ESP_LOGW(TAG, "音频数据写入不完整: 预期 %zu 字节，实际写入 %zu 字节", data_len, total_written);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "音频数据写入完成，成功写入 %zu 字节 (%.2f 秒音频)", total_written, (float)total_written / 2 / SAMPLE_RATE);
+    // 播放完成后停止I2S输出以防止噪音
+    esp_err_t stop_ret = bsp_audio_stop();
+    if (stop_ret != ESP_OK)
+    {
+        ESP_LOGW(TAG, "停止音频输出时出现警告: %s", esp_err_to_name(stop_ret));
+    }
+
+    ESP_LOGI(TAG, "音频播放完成，播放了 %zu 字节", total_written);
     return ESP_OK;
 }
 
