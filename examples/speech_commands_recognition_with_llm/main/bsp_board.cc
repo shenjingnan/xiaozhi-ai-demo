@@ -25,6 +25,8 @@
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_check.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // INMP441 I2S 引脚配置
 // INMP441 是一个数字 MEMS 麦克风，通过 I2S 接口与 ESP32-S3 通信
@@ -37,6 +39,7 @@
 #define I2S_OUT_BCLK_PIN GPIO_NUM_15 // 位时钟信号 (Bit Clock)
 #define I2S_OUT_LRC_PIN GPIO_NUM_16  // 左右声道时钟信号 (LR Clock)
 #define I2S_OUT_DIN_PIN GPIO_NUM_7   // 数据输入信号 (Data Input)
+#define I2S_OUT_SD_PIN GPIO_NUM_8    // Shutdown引脚 (可选，用于关闭功放)
 
 // I2S 配置参数
 #define I2S_PORT_RX I2S_NUM_0 // 使用 I2S 端口 0 用于录音
@@ -125,6 +128,19 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
     {
         ESP_LOGE(TAG, "启用 I2S 通道失败: %s", esp_err_to_name(ret));
         return ret;
+    }
+
+    // 清理初始噪音：读取并丢弃前几帧数据
+    const size_t discard_samples = 8192; // 丢弃前8KB数据
+    uint8_t *discard_buffer = (uint8_t *)malloc(discard_samples);
+    if (discard_buffer) {
+        size_t bytes_read;
+        for (int i = 0; i < 3; i++) { // 读取3次
+            i2s_channel_read(rx_handle, discard_buffer, discard_samples, &bytes_read, pdMS_TO_TICKS(100));
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        free(discard_buffer);
+        ESP_LOGD(TAG, "已清理I2S输入缓冲区初始数据");
     }
 
     ESP_LOGI(TAG, "I2S 初始化成功");
@@ -246,6 +262,18 @@ esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_
 {
     esp_err_t ret = ESP_OK;
 
+    // 初始化MAX98357A的SD引脚（如果已连接）
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << I2S_OUT_SD_PIN),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+    gpio_set_level(I2S_OUT_SD_PIN, 1); // 高电平启用功放
+    ESP_LOGI(TAG, "MAX98357A SD引脚已初始化（GPIO%d）", I2S_OUT_SD_PIN);
+
     // 创建 I2S 发送通道配置
     // 设置为主模式，ESP32-S3 作为时钟源
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT_TX, I2S_ROLE_MASTER);
@@ -320,6 +348,7 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
 {
     esp_err_t ret = ESP_OK;
     size_t bytes_written = 0;
+    size_t total_written = 0;
 
     if (tx_handle == nullptr)
     {
@@ -336,6 +365,11 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
     // 确保 I2S 发送通道已启用（如果之前被停止了）
     if (!tx_channel_enabled)
     {
+        // 先启用功放
+        gpio_set_level(I2S_OUT_SD_PIN, 1); // 高电平启用功放
+        vTaskDelay(pdMS_TO_TICKS(10)); // 等待功放启动
+        ESP_LOGD(TAG, "MAX98357A功放已启用");
+        
         ret = i2s_channel_enable(tx_handle);
         if (ret != ESP_OK)
         {
@@ -344,31 +378,54 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
         }
         tx_channel_enabled = true;
         ESP_LOGD(TAG, "I2S 发送通道已重新启用");
+        
+        // 发送一小段静音数据来初始化通道
+        const size_t init_silence_size = 1024; // 1KB的静音数据
+        uint8_t *init_silence = (uint8_t *)calloc(init_silence_size, 1);
+        if (init_silence) {
+            size_t bytes_written = 0;
+            i2s_channel_write(tx_handle, init_silence, init_silence_size, &bytes_written, pdMS_TO_TICKS(10));
+            free(init_silence);
+        }
     }
 
-    // 将音频数据写入 I2S 发送通道
-    ret = i2s_channel_write(tx_handle, audio_data, data_len, &bytes_written, portMAX_DELAY);
-
-    if (ret != ESP_OK)
+    // 循环写入音频数据，确保所有数据都被发送
+    while (total_written < data_len)
     {
-        ESP_LOGE(TAG, "写入 I2S 音频数据失败: %s", esp_err_to_name(ret));
-        return ret;
+        size_t bytes_to_write = data_len - total_written;
+        
+        // 将音频数据写入 I2S 发送通道
+        ret = i2s_channel_write(tx_handle, audio_data + total_written, bytes_to_write, &bytes_written, portMAX_DELAY);
+
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "写入 I2S 音频数据失败: %s", esp_err_to_name(ret));
+            break;
+        }
+
+        total_written += bytes_written;
+
+        // 显示播放进度（每10KB显示一次）
+        if ((total_written % 10240) < bytes_written)
+        {
+            ESP_LOGD(TAG, "音频播放进度: %zu/%zu 字节 (%.1f%%)", 
+                     total_written, data_len, (float)total_written * 100.0f / data_len);
+        }
     }
 
-    // 检查写入的数据长度是否符合预期
-    if (bytes_written != data_len)
+    // 计算预期的播放时间（仅用于日志显示）
+    uint32_t play_time_ms = (data_len / 2) * 1000 / SAMPLE_RATE;
+    ESP_LOGI(TAG, "音频数据已发送到I2S，预计播放时间: %.2f 秒", play_time_ms / 1000.0f);
+    
+    // 注意：不在这里停止I2S或等待，让调用者根据需要控制播放时长
+
+    if (total_written != data_len)
     {
-        ESP_LOGW(TAG, "预期写入 %d 字节，实际写入 %d 字节", data_len, bytes_written);
+        ESP_LOGW(TAG, "音频数据写入不完整: 预期 %zu 字节，实际写入 %zu 字节", data_len, total_written);
+        return ESP_FAIL;
     }
 
-    // 播放完成后停止I2S输出以防止噪音
-    esp_err_t stop_ret = bsp_audio_stop();
-    if (stop_ret != ESP_OK)
-    {
-        ESP_LOGW(TAG, "停止音频输出时出现警告: %s", esp_err_to_name(stop_ret));
-    }
-
-    ESP_LOGI(TAG, "音频播放完成，播放了 %d 字节", bytes_written);
+    ESP_LOGI(TAG, "音频数据写入完成，成功写入 %zu 字节 (%.2f 秒音频)", total_written, (float)total_written / 2 / SAMPLE_RATE);
     return ESP_OK;
 }
 
@@ -394,6 +451,25 @@ esp_err_t bsp_audio_stop(void)
     // 只有在通道启用时才禁用它
     if (tx_channel_enabled)
     {
+        // 发送一些静音数据来清空缓冲区
+        const size_t silence_size = 4096; // 4KB的静音数据
+        uint8_t *silence_buffer = (uint8_t *)calloc(silence_size, 1);
+        if (silence_buffer) {
+            size_t bytes_written = 0;
+            i2s_channel_write(tx_handle, silence_buffer, silence_size, &bytes_written, pdMS_TO_TICKS(100));
+            free(silence_buffer);
+            ESP_LOGD(TAG, "已发送静音数据清空缓冲区");
+        }
+        
+        // 等待一小段时间让静音数据播放完
+        vTaskDelay(pdMS_TO_TICKS(50));
+        
+        // 先通过SD引脚关闭功放，防止噪音
+        gpio_set_level(I2S_OUT_SD_PIN, 0); // 低电平关闭功放
+        ESP_LOGD(TAG, "MAX98357A功放已关闭");
+        vTaskDelay(pdMS_TO_TICKS(10)); // 等待功放完全关闭
+        
+        // 禁用I2S发送通道
         ret = i2s_channel_disable(tx_handle);
         if (ret != ESP_OK)
         {

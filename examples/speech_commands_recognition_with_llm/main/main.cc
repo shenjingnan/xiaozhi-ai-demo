@@ -134,7 +134,7 @@ static const int SILENCE_THRESHOLD = 200; // 静音阈值
 static const int SILENCE_FRAMES_REQUIRED = 30; // 需要连续30帧静音才认为说话结束
 
 // 接收音频相关变量
-#define RESPONSE_BUFFER_SIZE (SAMPLE_RATE * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
+#define RESPONSE_BUFFER_SIZE (1024 * 1024) // 1MB的音频数据 (可容纳约32秒的16kHz音频)
 static int16_t *response_buffer = NULL;
 static size_t response_length = 0;
 static bool response_played = false;  // 标记响应音频是否已播放
@@ -160,17 +160,47 @@ static void process_response_audio(const uint8_t *audio_data, size_t data_size)
         // 立即播放音频
         ESP_LOGI(TAG, "📢 播放响应音频: %zu 样本 (%.2f 秒)", 
                  response_length, (float)response_length / SAMPLE_RATE);
-        esp_err_t audio_ret = bsp_play_audio((const uint8_t *)response_buffer, response_length * sizeof(int16_t));
-        if (audio_ret == ESP_OK) {
-            ESP_LOGI(TAG, "✅ 响应音频播放完成");
-            response_played = true;
-        } else {
-            ESP_LOGE(TAG, "❌ 响应音频播放失败: %s", esp_err_to_name(audio_ret));
+        
+        // 添加重试机制确保音频播放完整
+        int retry_count = 0;
+        const int max_retries = 3;
+        esp_err_t audio_ret = ESP_FAIL;
+        
+        while (retry_count < max_retries && audio_ret != ESP_OK) {
+            audio_ret = bsp_play_audio((const uint8_t *)response_buffer, response_length * sizeof(int16_t));
+            if (audio_ret == ESP_OK) {
+                ESP_LOGI(TAG, "✅ 音频数据已写入I2S");
+                
+                // 计算音频播放时间并等待
+                uint32_t play_time_ms = (response_length * sizeof(int16_t) / 2) * 1000 / SAMPLE_RATE;
+                uint32_t buffer_time_ms = 50; // 额外的缓冲时间
+                ESP_LOGI(TAG, "等待音频播放完成: %.2f 秒", (play_time_ms + buffer_time_ms) / 1000.0f);
+                vTaskDelay(pdMS_TO_TICKS(play_time_ms + buffer_time_ms));
+                
+                // 播放完成后立即停止I2S，防止噪音
+                esp_err_t stop_ret = bsp_audio_stop();
+                if (stop_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "✅ 音频播放完成并已停止I2S");
+                } else {
+                    ESP_LOGW(TAG, "⚠️ 停止I2S时出现警告: %s", esp_err_to_name(stop_ret));
+                }
+                
+                response_played = true;
+                break;
+            } else {
+                ESP_LOGE(TAG, "❌ 音频数据写入失败 (尝试 %d/%d): %s", 
+                         retry_count + 1, max_retries, esp_err_to_name(audio_ret));
+                retry_count++;
+                if (retry_count < max_retries) {
+                    vTaskDelay(pdMS_TO_TICKS(100)); // 等待100ms后重试
+                }
+            }
         }
     }
     else
     {
-        ESP_LOGW(TAG, "响应音频数据过大，无法处理");
+        ESP_LOGW(TAG, "响应音频数据过大 (%zu 样本)，超过缓冲区限制 (%d 样本)", 
+                 response_length, RESPONSE_BUFFER_SIZE / sizeof(int16_t));
     }
 }
 
@@ -221,7 +251,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
             static uint8_t *audio_buffer = NULL;
             static size_t audio_buffer_size = 0;
             static size_t audio_buffer_len = 0;
-            static const size_t MAX_AUDIO_SIZE = 100 * 1024; // 最大100KB的音频数据
+            static const size_t MAX_AUDIO_SIZE = 1024 * 1024; // 最大1MB的音频数据
             static bool receiving_audio = false;
             static TickType_t last_audio_time = 0;
             
@@ -246,7 +276,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
                         free(audio_buffer);
                     }
                     audio_buffer_size = MAX_AUDIO_SIZE;
-                    audio_buffer = (uint8_t *)malloc(audio_buffer_size);
+                    audio_buffer = (uint8_t *)calloc(audio_buffer_size, 1);
                     if (!audio_buffer) {
                         ESP_LOGE(TAG, "无法分配音频缓冲区");
                         receiving_audio = false;
@@ -288,9 +318,9 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
                     audio_buffer_len = 0;
                 }
             }
-            // 超时检测（如果200ms没有新数据，认为传输结束）
+            // 超时检测（如果500ms没有新数据，认为传输结束）
             else if (receiving_audio && last_audio_time > 0 && 
-                     (xTaskGetTickCount() - last_audio_time) > pdMS_TO_TICKS(200)) {
+                     (xTaskGetTickCount() - last_audio_time) > pdMS_TO_TICKS(500)) {
                 ESP_LOGI(TAG, "音频数据接收超时，准备播放");
                 receiving_audio = false;
                 
@@ -742,6 +772,37 @@ static bool is_silence(int16_t *buffer, int samples)
 }
 
 /**
+ * @brief 播放音频并自动停止I2S
+ * 
+ * @param audio_data 音频数据
+ * @param data_len 数据长度
+ * @param description 音频描述（用于日志）
+ * @return esp_err_t 播放结果
+ */
+static esp_err_t play_audio_with_stop(const uint8_t *audio_data, size_t data_len, const char *description)
+{
+    esp_err_t ret = bsp_play_audio(audio_data, data_len);
+    if (ret == ESP_OK) {
+        // 计算播放时间
+        uint32_t play_time_ms = (data_len / 2) * 1000 / SAMPLE_RATE;
+        uint32_t buffer_time_ms = 50;
+        ESP_LOGI(TAG, "等待%s播放完成: %.2f 秒", description, (play_time_ms + buffer_time_ms) / 1000.0f);
+        vTaskDelay(pdMS_TO_TICKS(play_time_ms + buffer_time_ms));
+        
+        // 停止I2S
+        esp_err_t stop_ret = bsp_audio_stop();
+        if (stop_ret == ESP_OK) {
+            ESP_LOGI(TAG, "✓ %s播放成功", description);
+        } else {
+            ESP_LOGW(TAG, "停止I2S时出现警告: %s", esp_err_to_name(stop_ret));
+        }
+    } else {
+        ESP_LOGE(TAG, "%s播放失败: %s", description, esp_err_to_name(ret));
+    }
+    return ret;
+}
+
+/**
  * @brief 执行退出逻辑
  *
  * 播放再见音频并返回等待唤醒状态
@@ -750,15 +811,7 @@ static void execute_exit_logic(void)
 {
     // 播放再见音频
     ESP_LOGI(TAG, "播放再见音频...");
-    esp_err_t audio_ret = bsp_play_audio(byebye, byebye_len);
-    if (audio_ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "✓ 再见音频播放成功");
-    }
-    else
-    {
-        ESP_LOGE(TAG, "再见音频播放失败: %s", esp_err_to_name(audio_ret));
-    }
+    play_audio_with_stop(byebye, byebye_len, "再见音频");
     
     // 断开WebSocket连接
     websocket_disconnect();
@@ -960,8 +1013,8 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 录音缓冲区分配成功，大小: %d 字节", RECORDING_BUFFER_SIZE);
     
-    // 分配响应音频缓冲区
-    response_buffer = (int16_t *)malloc(RESPONSE_BUFFER_SIZE);
+    // 分配响应音频缓冲区（使用calloc确保初始化为0）
+    response_buffer = (int16_t *)calloc(RESPONSE_BUFFER_SIZE / sizeof(int16_t), sizeof(int16_t));
     if (response_buffer == NULL)
     {
         ESP_LOGE(TAG, "响应缓冲区内存分配失败，需要 %d 字节", RESPONSE_BUFFER_SIZE);
@@ -969,7 +1022,7 @@ extern "C" void app_main(void)
         free(recording_buffer);
         return;
     }
-    ESP_LOGI(TAG, "✓ 响应缓冲区分配成功，大小: %d 字节", RESPONSE_BUFFER_SIZE);
+    ESP_LOGI(TAG, "✓ 响应缓冲区分配成功，大小: %d 字节（已初始化为0）", RESPONSE_BUFFER_SIZE);
     
     // 创建串口输入处理任务
     // 不再需要串口输入任务，改用WebSocket
@@ -1030,14 +1083,13 @@ extern "C" void app_main(void)
 
                 // 播放欢迎音频
                 ESP_LOGI(TAG, "播放欢迎音频...");
-                esp_err_t audio_ret = bsp_play_audio(welcome, welcome_len);
-                if (audio_ret != ESP_OK)
-                {
-                    ESP_LOGE(TAG, "音频播放失败: %s", esp_err_to_name(audio_ret));
-                }
-                else
-                {
-                    ESP_LOGI(TAG, "✓ 欢迎音频播放成功");
+                play_audio_with_stop(welcome, welcome_len, "欢迎音频");
+
+                // 确保I2S输出完全停止，避免录音时产生噪音
+                vTaskDelay(pdMS_TO_TICKS(100)); // 额外等待100ms
+                esp_err_t stop_ret = bsp_audio_stop();
+                if (stop_ret != ESP_OK) {
+                    ESP_LOGW(TAG, "录音前停止I2S失败: %s", esp_err_to_name(stop_ret));
                 }
 
                 // 切换到录音状态
@@ -1143,11 +1195,7 @@ extern "C" void app_main(void)
                         led_turn_on();
 
                         // 播放开灯确认音频
-                        esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 开灯确认音频播放成功");
-                        }
+                        play_audio_with_stop(light_on, light_on_len, "开灯确认音频");
                     }
                     else if (command_id == COMMAND_TURN_OFF_LIGHT)
                     {
@@ -1155,22 +1203,14 @@ extern "C" void app_main(void)
                         led_turn_off();
 
                         // 播放关灯确认音频
-                        esp_err_t audio_ret = bsp_play_audio(light_off, light_off_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 关灯确认音频播放成功");
-                        }
+                        play_audio_with_stop(light_off, light_off_len, "关灯确认音频");
                     }
                     else if (command_id == COMMAND_CUSTOM)
                     {
                         ESP_LOGI(TAG, "💡 执行自定义命令词");
 
                         // 播放自定义确认音频
-                        esp_err_t audio_ret = bsp_play_audio(custom, custom_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 自定义确认音频播放成功");
-                        }
+                        play_audio_with_stop(custom, custom_len, "自定义确认音频");
                     }
                     else if (command_id == COMMAND_BYE_BYE)
                     {
