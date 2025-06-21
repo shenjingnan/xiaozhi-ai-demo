@@ -33,6 +33,7 @@ extern "C"
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/stream_buffer.h"  // 流缓冲区
 #include "mbedtls/base64.h" // Base64编码库
 #include "esp_timer.h"      // ESP定时器，用于获取时间戳
 #include "esp_wn_iface.h"           // 唤醒词检测接口
@@ -50,6 +51,7 @@ extern "C"
 #include "mock_voices/byebye.h"     // 再见音频数据文件
 #include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
+#include "driver/uart.h"            // UART驱动
 }
 
 static const char *TAG = "语音识别"; // 日志标签
@@ -62,7 +64,8 @@ typedef enum
 {
     STATE_WAITING_WAKEUP = 0,  // 等待唤醒词
     STATE_RECORDING = 1,       // 录音中
-    STATE_WAITING_COMMAND = 2, // 等待命令词
+    STATE_WAITING_RESPONSE = 2, // 等待Python响应
+    STATE_WAITING_COMMAND = 3, // 等待命令词
 } system_state_t;
 
 // 命令词ID定义（对应commands_cn.txt中的ID）
@@ -96,14 +99,24 @@ static model_iface_data_t *mn_model_data = NULL;
 static TickType_t command_timeout_start = 0;
 static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 
+// 音频参数
+#define SAMPLE_RATE 16000  // 采样率 16kHz
+
 // 录音相关变量
-#define RECORDING_BUFFER_SIZE (16000 * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
+#define RECORDING_BUFFER_SIZE (SAMPLE_RATE * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
 static int16_t *recording_buffer = NULL;
 static size_t recording_length = 0;
 static bool is_recording = false;
 static int silence_frames = 0;
 static const int SILENCE_THRESHOLD = 200; // 静音阈值
 static const int SILENCE_FRAMES_REQUIRED = 30; // 需要连续30帧静音才认为说话结束
+
+// 接收音频相关变量
+#define RESPONSE_BUFFER_SIZE (SAMPLE_RATE * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
+static int16_t *response_buffer = NULL;
+static size_t response_length = 0;
+static bool is_receiving_response = false;
+static uint32_t expected_response_sequence = 0;
 
 /**
  * @brief 初始化外接LED GPIO
@@ -311,7 +324,9 @@ static void send_recorded_audio(void)
     size_t sent_samples = 0;
     uint32_t sequence = 0;
     
-    ESP_LOGI(TAG, "开始发送录音数据，总大小: %zu 样本", recording_length);
+    ESP_LOGI(TAG, "开始发送录音数据，总大小: %zu 样本 (%.2f 秒), %zu 字节", 
+             recording_length, (float)recording_length / SAMPLE_RATE, 
+             recording_length * sizeof(int16_t));
     
     // 发送开始录音事件
     printf("{\"event\":\"recording_started\",\"timestamp\":%lld}\n", 
@@ -338,6 +353,176 @@ static void send_recorded_audio(void)
     fflush(stdout);
     
     ESP_LOGI(TAG, "✅ 录音数据发送完成，共 %lu 个数据包", (unsigned long)sequence);
+}
+
+/**
+ * @brief 处理接收到的音频响应数据
+ *
+ * @param base64_data Base64编码的音频数据
+ * @param sequence 数据包序号
+ */
+static void process_response_audio(const char *base64_data, uint32_t sequence)
+{
+    if (!is_receiving_response)
+    {
+        ESP_LOGW(TAG, "收到音频数据但未处于接收状态");
+        return;
+    }
+    
+    if (sequence != expected_response_sequence)
+    {
+        ESP_LOGW(TAG, "音频数据包序号不连续: 期望 %lu, 收到 %lu", 
+                 (unsigned long)expected_response_sequence, (unsigned long)sequence);
+    }
+    
+    // Base64解码
+    size_t output_size = 0;
+    unsigned char *decoded_data = NULL;
+    size_t input_len = strlen(base64_data);
+    size_t max_output_size = (input_len * 3) / 4 + 1;
+    
+    decoded_data = (unsigned char *)malloc(max_output_size);
+    if (decoded_data == NULL)
+    {
+        ESP_LOGE(TAG, "无法分配解码缓冲区");
+        return;
+    }
+    
+    int ret = mbedtls_base64_decode(decoded_data, max_output_size, &output_size,
+                                    (const unsigned char *)base64_data, input_len);
+    
+    if (ret == 0)
+    {
+        // 将解码后的数据添加到响应缓冲区
+        size_t samples_to_add = output_size / sizeof(int16_t);
+        if (response_length + samples_to_add <= RESPONSE_BUFFER_SIZE / sizeof(int16_t))
+        {
+            memcpy(&response_buffer[response_length], decoded_data, output_size);
+            response_length += samples_to_add;
+            ESP_LOGI(TAG, "📦 接收音频数据包 #%lu: %zu 字节, 总计: %zu 样本", 
+                     (unsigned long)sequence, output_size, response_length);
+        }
+        else
+        {
+            ESP_LOGW(TAG, "响应缓冲区已满，丢弃数据包");
+        }
+    }
+    else
+    {
+        ESP_LOGE(TAG, "Base64解码失败: %d", ret);
+    }
+    
+    free(decoded_data);
+    expected_response_sequence = sequence + 1;
+}
+
+/**
+ * @brief 串口输入处理任务
+ *
+ * 接收并处理来自Python脚本的JSON消息
+ */
+static void uart_input_task(void *pvParameters)
+{
+    char line_buffer[2048];
+    int line_pos = 0;
+    
+    ESP_LOGI(TAG, "串口输入任务已启动");
+    
+    while (1)
+    {
+        int ch = getchar();
+        if (ch != EOF)
+        {
+            if (ch == '\n')
+            {
+                line_buffer[line_pos] = '\0';
+                
+                // 尝试解析JSON
+                if (line_buffer[0] == '{')
+                {
+                    // 简单的JSON解析，查找event字段
+                    char *event_start = strstr(line_buffer, "\"event\":\"");
+                    if (event_start)
+                    {
+                        event_start += 9; // 跳过 "event":"
+                        char *event_end = strchr(event_start, '"');
+                        if (event_end)
+                        {
+                            *event_end = '\0';
+                            
+                            if (strcmp(event_start, "response_started") == 0)
+                            {
+                                ESP_LOGI(TAG, "🎵 开始接收响应音频");
+                                is_receiving_response = true;
+                                response_length = 0;
+                                expected_response_sequence = 0;
+                            }
+                            else if (strcmp(event_start, "response_audio") == 0)
+                            {
+                                // 提取sequence和data
+                                char *seq_start = strstr(line_buffer, "\"sequence\":");
+                                char *data_start = strstr(line_buffer, "\"data\":\"");
+                                
+                                if (seq_start && data_start)
+                                {
+                                    uint32_t sequence = 0;
+                                    sscanf(seq_start + 11, "%lu", (unsigned long*)&sequence);
+                                    
+                                    data_start += 8; // 跳过 "data":"
+                                    char *data_end = strchr(data_start, '"');
+                                    if (data_end)
+                                    {
+                                        *data_end = '\0';
+                                        process_response_audio(data_start, sequence);
+                                    }
+                                }
+                            }
+                            else if (strcmp(event_start, "response_stopped") == 0)
+                            {
+                                ESP_LOGI(TAG, "响应音频接收完成，准备播放");
+                                is_receiving_response = false;
+                                
+                                // 播放接收到的音频
+                                if (response_length > 0)
+                                {
+                                    size_t audio_bytes = response_length * sizeof(int16_t);
+                                    ESP_LOGI(TAG, "播放响应音频: %zu 字节 (%.2f 秒)", 
+                                             audio_bytes, (float)response_length / SAMPLE_RATE);
+                                    
+                                    esp_err_t audio_ret = bsp_play_audio((const unsigned char *)response_buffer, audio_bytes);
+                                    if (audio_ret == ESP_OK)
+                                    {
+                                        ESP_LOGI(TAG, "✓ 响应音频播放完成");
+                                    }
+                                    else
+                                    {
+                                        ESP_LOGE(TAG, "响应音频播放失败: %s", esp_err_to_name(audio_ret));
+                                    }
+                                    
+                                    // 播放完成后，切换到命令词识别状态
+                                    if (current_state == STATE_WAITING_RESPONSE)
+                                    {
+                                        current_state = STATE_WAITING_COMMAND;
+                                        command_timeout_start = xTaskGetTickCount();
+                                        multinet->clean(mn_model_data); // 清理命令词识别缓冲区
+                                        ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
+                                        ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                line_pos = 0;
+            }
+            else if (line_pos < sizeof(line_buffer) - 1)
+            {
+                line_buffer[line_pos++] = ch;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
 }
 
 /**
@@ -562,6 +747,21 @@ extern "C" void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "✓ 录音缓冲区分配成功，大小: %d 字节", RECORDING_BUFFER_SIZE);
+    
+    // 分配响应音频缓冲区
+    response_buffer = (int16_t *)malloc(RESPONSE_BUFFER_SIZE);
+    if (response_buffer == NULL)
+    {
+        ESP_LOGE(TAG, "响应缓冲区内存分配失败，需要 %d 字节", RESPONSE_BUFFER_SIZE);
+        free(buffer);
+        free(recording_buffer);
+        return;
+    }
+    ESP_LOGI(TAG, "✓ 响应缓冲区分配成功，大小: %d 字节", RESPONSE_BUFFER_SIZE);
+    
+    // 创建串口输入处理任务
+    xTaskCreate(uart_input_task, "uart_input", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "✓ 串口输入任务已创建");
 
     // 显示系统配置信息
     ESP_LOGI(TAG, "✓ 智能语音助手系统配置完成:");
@@ -644,30 +844,30 @@ extern "C" void app_main(void)
                     if (silence_frames >= SILENCE_FRAMES_REQUIRED)
                     {
                         // 检测到持续静音，认为用户说完了
-                        ESP_LOGI(TAG, "检测到用户说话结束，录音长度: %zu 样本", recording_length);
+                        ESP_LOGI(TAG, "检测到用户说话结束，录音长度: %zu 样本 (%.2f 秒)", 
+                                 recording_length, (float)recording_length / SAMPLE_RATE);
                         is_recording = false;
 
                         // 发送录音数据到Python脚本
                         ESP_LOGI(TAG, "正在发送录音数据到电脑...");
                         send_recorded_audio();
-
-                        // 播放录制的音频
-                        ESP_LOGI(TAG, "正在播放您刚才说的话...");
-                        size_t audio_bytes = recording_length * sizeof(int16_t);
-                        esp_err_t audio_ret = bsp_play_audio((const unsigned char *)recording_buffer, audio_bytes);
+                        
+                        // 直接播放预设的响应音频（暂时绕过Python响应）
+                        ESP_LOGI(TAG, "播放预设响应音频...");
+                        esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
                         if (audio_ret == ESP_OK)
                         {
-                            ESP_LOGI(TAG, "✓ 录音回放完成");
+                            ESP_LOGI(TAG, "✓ 响应音频播放完成");
                         }
                         else
                         {
-                            ESP_LOGE(TAG, "录音回放失败: %s", esp_err_to_name(audio_ret));
+                            ESP_LOGE(TAG, "响应音频播放失败: %s", esp_err_to_name(audio_ret));
                         }
-
+                        
                         // 切换到命令词识别状态
                         current_state = STATE_WAITING_COMMAND;
                         command_timeout_start = xTaskGetTickCount();
-                        multinet->clean(mn_model_data); // 清理命令词识别缓冲区
+                        multinet->clean(mn_model_data);
                         ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
                         ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
                     }
@@ -688,25 +888,36 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "正在发送录音数据到电脑...");
                 send_recorded_audio();
                 
-                // 播放录制的音频
-                ESP_LOGI(TAG, "正在播放您刚才说的话...");
-                size_t audio_bytes = recording_length * sizeof(int16_t);
-                esp_err_t audio_ret = bsp_play_audio((const unsigned char *)recording_buffer, audio_bytes);
+                // 直接播放预设的响应音频（暂时绕过Python响应）
+                ESP_LOGI(TAG, "播放预设响应音频...");
+                esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
                 if (audio_ret == ESP_OK)
                 {
-                    ESP_LOGI(TAG, "✓ 录音回放完成");
+                    ESP_LOGI(TAG, "✓ 响应音频播放完成");
                 }
                 else
                 {
-                    ESP_LOGE(TAG, "录音回放失败: %s", esp_err_to_name(audio_ret));
+                    ESP_LOGE(TAG, "响应音频播放失败: %s", esp_err_to_name(audio_ret));
                 }
                 
                 // 切换到命令词识别状态
                 current_state = STATE_WAITING_COMMAND;
                 command_timeout_start = xTaskGetTickCount();
-                multinet->clean(mn_model_data); // 清理命令词识别缓冲区
+                multinet->clean(mn_model_data);
                 ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
                 ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
+            }
+        }
+        else if (current_state == STATE_WAITING_RESPONSE)
+        {
+            // 等待Python脚本响应音频
+            // 所有处理都在uart_input_task中完成
+            // 这里只是继续等待，不做超时处理
+            static int wait_count = 0;
+            if (++wait_count % 1000 == 0)  // 每秒显示一次
+            {
+                ESP_LOGI(TAG, "等待响应中... (is_receiving=%d, response_len=%zu)", 
+                         is_receiving_response, response_length);
             }
         }
         else if (current_state == STATE_WAITING_COMMAND)
@@ -823,6 +1034,12 @@ extern "C" void app_main(void)
     if (recording_buffer != NULL)
     {
         free(recording_buffer);
+    }
+    
+    // 释放响应缓冲区内存
+    if (response_buffer != NULL)
+    {
+        free(response_buffer);
     }
 
     // 删除当前任务
