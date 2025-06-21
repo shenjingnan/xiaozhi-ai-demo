@@ -30,6 +30,7 @@ extern "C"
 {
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_wn_iface.h"           // 唤醒词检测接口
@@ -58,7 +59,8 @@ static const char *TAG = "语音识别"; // 日志标签
 typedef enum
 {
     STATE_WAITING_WAKEUP = 0,  // 等待唤醒词
-    STATE_WAITING_COMMAND = 1, // 等待命令词
+    STATE_RECORDING = 1,       // 录音中
+    STATE_WAITING_COMMAND = 2, // 等待命令词
 } system_state_t;
 
 // 命令词ID定义（对应commands_cn.txt中的ID）
@@ -91,6 +93,15 @@ static esp_mn_iface_t *multinet = NULL;
 static model_iface_data_t *mn_model_data = NULL;
 static TickType_t command_timeout_start = 0;
 static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
+
+// 录音相关变量
+#define RECORDING_BUFFER_SIZE (16000 * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
+static int16_t *recording_buffer = NULL;
+static size_t recording_length = 0;
+static bool is_recording = false;
+static int silence_frames = 0;
+static const int SILENCE_THRESHOLD = 200; // 静音阈值
+static const int SILENCE_FRAMES_REQUIRED = 30; // 需要连续30帧静音才认为说话结束
 
 /**
  * @brief 初始化外接LED GPIO
@@ -237,6 +248,25 @@ static const char *get_command_description(int command_id)
         }
     }
     return "未知命令";
+}
+
+/**
+ * @brief 检测音频是否为静音
+ *
+ * @param buffer 音频数据缓冲区
+ * @param samples 样本数
+ * @return true 如果是静音
+ * @return false 如果不是静音
+ */
+static bool is_silence(int16_t *buffer, int samples)
+{
+    int64_t sum = 0;
+    for (int i = 0; i < samples; i++)
+    {
+        sum += abs(buffer[i]);
+    }
+    int avg = sum / samples;
+    return avg < SILENCE_THRESHOLD;
 }
 
 /**
@@ -433,6 +463,16 @@ extern "C" void app_main(void)
         return;
     }
 
+    // 分配录音缓冲区
+    recording_buffer = (int16_t *)malloc(RECORDING_BUFFER_SIZE);
+    if (recording_buffer == NULL)
+    {
+        ESP_LOGE(TAG, "录音缓冲区内存分配失败，需要 %d 字节", RECORDING_BUFFER_SIZE);
+        free(buffer);
+        return;
+    }
+    ESP_LOGI(TAG, "✓ 录音缓冲区分配成功，大小: %d 字节", RECORDING_BUFFER_SIZE);
+
     // 显示系统配置信息
     ESP_LOGI(TAG, "✓ 智能语音助手系统配置完成:");
     ESP_LOGI(TAG, "  - 唤醒词模型: %s", model_name);
@@ -480,6 +520,80 @@ extern "C" void app_main(void)
                     ESP_LOGI(TAG, "✓ 欢迎音频播放成功");
                 }
 
+                // 切换到录音状态
+                current_state = STATE_RECORDING;
+                is_recording = true;
+                recording_length = 0;
+                silence_frames = 0;
+                ESP_LOGI(TAG, "开始录音，请说话...");
+            }
+        }
+        else if (current_state == STATE_RECORDING)
+        {
+            // 录音阶段：录制用户说话内容
+            if (is_recording && recording_length < RECORDING_BUFFER_SIZE / sizeof(int16_t))
+            {
+                // 将音频数据存入录音缓冲区
+                int samples = audio_chunksize / sizeof(int16_t);
+                memcpy(&recording_buffer[recording_length], buffer, audio_chunksize);
+                recording_length += samples;
+
+                // 检测静音
+                if (is_silence(buffer, samples))
+                {
+                    silence_frames++;
+                    if (silence_frames >= SILENCE_FRAMES_REQUIRED)
+                    {
+                        // 检测到持续静音，认为用户说完了
+                        ESP_LOGI(TAG, "检测到用户说话结束，录音长度: %zu 样本", recording_length);
+                        is_recording = false;
+
+                        // 播放录制的音频
+                        ESP_LOGI(TAG, "正在播放您刚才说的话...");
+                        size_t audio_bytes = recording_length * sizeof(int16_t);
+                        esp_err_t audio_ret = bsp_play_audio((const unsigned char *)recording_buffer, audio_bytes);
+                        if (audio_ret == ESP_OK)
+                        {
+                            ESP_LOGI(TAG, "✓ 录音回放完成");
+                        }
+                        else
+                        {
+                            ESP_LOGE(TAG, "录音回放失败: %s", esp_err_to_name(audio_ret));
+                        }
+
+                        // 切换到命令词识别状态
+                        current_state = STATE_WAITING_COMMAND;
+                        command_timeout_start = xTaskGetTickCount();
+                        multinet->clean(mn_model_data); // 清理命令词识别缓冲区
+                        ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
+                        ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
+                    }
+                }
+                else
+                {
+                    // 检测到声音，重置静音计数
+                    silence_frames = 0;
+                }
+            }
+            else if (recording_length >= RECORDING_BUFFER_SIZE / sizeof(int16_t))
+            {
+                // 录音缓冲区满了，强制停止录音
+                ESP_LOGW(TAG, "录音缓冲区已满，停止录音");
+                is_recording = false;
+                
+                // 播放录制的音频
+                ESP_LOGI(TAG, "正在播放您刚才说的话...");
+                size_t audio_bytes = recording_length * sizeof(int16_t);
+                esp_err_t audio_ret = bsp_play_audio((const unsigned char *)recording_buffer, audio_bytes);
+                if (audio_ret == ESP_OK)
+                {
+                    ESP_LOGI(TAG, "✓ 录音回放完成");
+                }
+                else
+                {
+                    ESP_LOGE(TAG, "录音回放失败: %s", esp_err_to_name(audio_ret));
+                }
+                
                 // 切换到命令词识别状态
                 current_state = STATE_WAITING_COMMAND;
                 command_timeout_start = xTaskGetTickCount();
@@ -596,6 +710,12 @@ extern "C" void app_main(void)
     if (buffer != NULL)
     {
         free(buffer);
+    }
+
+    // 释放录音缓冲区内存
+    if (recording_buffer != NULL)
+    {
+        free(recording_buffer);
     }
 
     // 删除当前任务
