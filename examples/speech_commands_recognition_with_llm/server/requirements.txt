@@ -1,3 +1,4 @@
 pyserial>=3.5
 pydub>=0.25.1
 wave
+websockets>=11.0.3

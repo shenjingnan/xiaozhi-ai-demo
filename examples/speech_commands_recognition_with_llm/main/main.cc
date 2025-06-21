@@ -34,6 +34,7 @@ extern "C"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/stream_buffer.h"  // 流缓冲区
+#include "freertos/event_groups.h"  // 事件组
 #include "mbedtls/base64.h" // Base64编码库
 #include "esp_timer.h"      // ESP定时器，用于获取时间戳
 #include "esp_wn_iface.h"           // 唤醒词检测接口
@@ -52,12 +53,33 @@ extern "C"
 #include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
 #include "driver/uart.h"            // UART驱动
+#include "esp_wifi.h"               // WiFi驱动
+#include "esp_event.h"              // 事件循环
+#include "nvs_flash.h"              // NVS存储
+#include "esp_netif.h"              // 网络接口
+#include "esp_websocket_client.h"   // WebSocket客户端
 }
 
 static const char *TAG = "语音识别"; // 日志标签
 
 // 外接LED GPIO定义
 #define LED_GPIO GPIO_NUM_21 // 外接LED灯珠连接到GPIO21
+
+// WiFi配置
+#define WIFI_SSID "1804"
+#define WIFI_PASS "Sjn123123@"
+#define WIFI_MAXIMUM_RETRY 5
+
+// WebSocket配置
+#define WS_URI "ws://192.168.1.163:8888"  // 需要替换为实际的服务器IP
+
+// WiFi事件组
+static EventGroupHandle_t s_wifi_event_group;
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_FAIL_BIT      BIT1
+
+// WebSocket客户端句柄
+static esp_websocket_client_handle_t ws_client = NULL;
 
 // 系统状态定义
 typedef enum
@@ -115,8 +137,302 @@ static const int SILENCE_FRAMES_REQUIRED = 30; // 需要连续30帧静音才认�
 #define RESPONSE_BUFFER_SIZE (SAMPLE_RATE * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
 static int16_t *response_buffer = NULL;
 static size_t response_length = 0;
-static bool is_receiving_response = false;
-static uint32_t expected_response_sequence = 0;
+static bool response_played = false;  // 标记响应音频是否已播放
+
+// WiFi重试计数
+static int s_retry_num = 0;
+
+/**
+ * @brief 处理接收到的完整音频响应数据
+ *
+ * @param audio_data 二进制PCM音频数据
+ * @param data_size 数据大小（字节）
+ */
+static void process_response_audio(const uint8_t *audio_data, size_t data_size)
+{
+    // 将数据复制到响应缓冲区
+    response_length = data_size / sizeof(int16_t);
+    if (response_length <= RESPONSE_BUFFER_SIZE / sizeof(int16_t))
+    {
+        memcpy(response_buffer, audio_data, data_size);
+        ESP_LOGI(TAG, "📦 接收到完整音频数据: %zu 字节, %zu 样本", data_size, response_length);
+        
+        // 立即播放音频
+        ESP_LOGI(TAG, "📢 播放响应音频: %zu 样本 (%.2f 秒)", 
+                 response_length, (float)response_length / SAMPLE_RATE);
+        esp_err_t audio_ret = bsp_play_audio((const uint8_t *)response_buffer, response_length * sizeof(int16_t));
+        if (audio_ret == ESP_OK) {
+            ESP_LOGI(TAG, "✅ 响应音频播放完成");
+            response_played = true;
+        } else {
+            ESP_LOGE(TAG, "❌ 响应音频播放失败: %s", esp_err_to_name(audio_ret));
+        }
+    }
+    else
+    {
+        ESP_LOGW(TAG, "响应音频数据过大，无法处理");
+    }
+}
+
+/**
+ * @brief WiFi事件处理器
+ */
+static void wifi_event_handler(void* arg, esp_event_base_t event_base,
+                               int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_retry_num < WIFI_MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "重试连接WiFi... (%d/%d)", s_retry_num, WIFI_MAXIMUM_RETRY);
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        ESP_LOGI(TAG,"WiFi连接失败");
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "获得IP地址:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+
+/**
+ * @brief WebSocket事件处理器
+ */
+static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
+    
+    switch (event_id) {
+    case WEBSOCKET_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "🔗 WebSocket已连接");
+        break;
+        
+    case WEBSOCKET_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG, "🔌 WebSocket已断开");
+        break;
+        
+    case WEBSOCKET_EVENT_DATA:
+        {
+            // 静态缓冲区用于累积二进制音频数据
+            static uint8_t *audio_buffer = NULL;
+            static size_t audio_buffer_size = 0;
+            static size_t audio_buffer_len = 0;
+            static const size_t MAX_AUDIO_SIZE = 100 * 1024; // 最大100KB的音频数据
+            static bool receiving_audio = false;
+            static TickType_t last_audio_time = 0;
+            
+            ESP_LOGI(TAG, "收到WebSocket数据，长度: %d 字节, op_code: 0x%02x", data->data_len, data->op_code);
+            
+            // 检查是否是完整的数据包
+            if (data->op_code == 0x08 && data->data_len == 2) {
+                // WebSocket关闭帧
+                ESP_LOGI(TAG, "收到WebSocket关闭帧");
+                break;
+            }
+            
+            // 二进制数据处理 (op_code == 0x02 表示二进制帧)
+            if (data->op_code == 0x02 && data->data_len > 0) {
+                // 如果这是第一个二进制数据包
+                if (!receiving_audio) {
+                    ESP_LOGI(TAG, "开始接收二进制音频数据");
+                    receiving_audio = true;
+                    
+                    // 分配缓冲区
+                    if (audio_buffer) {
+                        free(audio_buffer);
+                    }
+                    audio_buffer_size = MAX_AUDIO_SIZE;
+                    audio_buffer = (uint8_t *)malloc(audio_buffer_size);
+                    if (!audio_buffer) {
+                        ESP_LOGE(TAG, "无法分配音频缓冲区");
+                        receiving_audio = false;
+                        break;
+                    }
+                    audio_buffer_len = 0;
+                }
+                
+                // 累积音频数据
+                if (audio_buffer && (audio_buffer_len + data->data_len) <= audio_buffer_size) {
+                    memcpy(audio_buffer + audio_buffer_len, data->data_ptr, data->data_len);
+                    audio_buffer_len += data->data_len;
+                    last_audio_time = xTaskGetTickCount();
+                    
+                    // 每累积10KB显示一次进度
+                    if (audio_buffer_len % 10240 < data->data_len) {
+                        ESP_LOGI(TAG, "累积音频数据: %zu KB", audio_buffer_len / 1024);
+                    }
+                }
+            }
+            // 检测音频传输结束（收到ping包）
+            else if (data->op_code == 0x09) {  // ping帧
+                ESP_LOGI(TAG, "收到ping包，检查是否有待播放的音频");
+                
+                if (receiving_audio && audio_buffer && audio_buffer_len > 0) {
+                    ESP_LOGI(TAG, "音频数据接收完成，总大小: %zu 字节 (%.2f 秒)", 
+                             audio_buffer_len, (float)audio_buffer_len / 2 / SAMPLE_RATE);
+                    receiving_audio = false;
+                    
+                    // 播放累积的音频数据
+                    if (current_state == STATE_WAITING_RESPONSE) {
+                        process_response_audio(audio_buffer, audio_buffer_len);
+                    }
+                    
+                    // 清理缓冲区
+                    free(audio_buffer);
+                    audio_buffer = NULL;
+                    audio_buffer_size = 0;
+                    audio_buffer_len = 0;
+                }
+            }
+            // 超时检测（如果200ms没有新数据，认为传输结束）
+            else if (receiving_audio && last_audio_time > 0 && 
+                     (xTaskGetTickCount() - last_audio_time) > pdMS_TO_TICKS(200)) {
+                ESP_LOGI(TAG, "音频数据接收超时，准备播放");
+                receiving_audio = false;
+                
+                // 播放累积的音频数据
+                if (audio_buffer && audio_buffer_len > 0 && current_state == STATE_WAITING_RESPONSE) {
+                    ESP_LOGI(TAG, "音频数据接收完成（超时），总大小: %zu 字节 (%.2f 秒)", 
+                             audio_buffer_len, (float)audio_buffer_len / 2 / SAMPLE_RATE);
+                    process_response_audio(audio_buffer, audio_buffer_len);
+                }
+                
+                // 清理缓冲区
+                if (audio_buffer) {
+                    free(audio_buffer);
+                    audio_buffer = NULL;
+                    audio_buffer_size = 0;
+                    audio_buffer_len = 0;
+                }
+                last_audio_time = 0;
+            }
+            // JSON数据处理（用于其他事件）
+            else if (data->data_ptr && data->data_len > 0 && data->data_ptr[0] == '{') {
+                // 创建临时缓冲区
+                char *json_str = (char *)malloc(data->data_len + 1);
+                if (json_str) {
+                    memcpy(json_str, data->data_ptr, data->data_len);
+                    json_str[data->data_len] = '\0';
+                    ESP_LOGI(TAG, "收到JSON消息: %s", json_str);
+                    free(json_str);
+                }
+            }
+        }
+        break;
+        
+    case WEBSOCKET_EVENT_ERROR:
+        ESP_LOGI(TAG, "❌ WebSocket错误");
+        break;
+    }
+}
+
+/**
+ * @brief 初始化WiFi连接
+ */
+static void wifi_init_sta(void)
+{
+    s_wifi_event_group = xEventGroupCreate();
+    
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    esp_netif_create_default_wifi_sta();
+    
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
+    
+    esp_event_handler_instance_t instance_any_id;
+    esp_event_handler_instance_t instance_got_ip;
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
+                                                        ESP_EVENT_ANY_ID,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_any_id));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
+                                                        IP_EVENT_STA_GOT_IP,
+                                                        &wifi_event_handler,
+                                                        NULL,
+                                                        &instance_got_ip));
+    
+    wifi_config_t wifi_config = {};
+    strcpy((char *)wifi_config.sta.ssid, WIFI_SSID);
+    strcpy((char *)wifi_config.sta.password, WIFI_PASS);
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+    
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    
+    ESP_LOGI(TAG, "WiFi初始化完成");
+    
+    // 等待连接或失败
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                          WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
+                                          pdFALSE,
+                                          pdFALSE,
+                                          portMAX_DELAY);
+    
+    if (bits & WIFI_CONNECTED_BIT) {
+        ESP_LOGI(TAG, "✅ WiFi连接成功: %s", WIFI_SSID);
+    } else if (bits & WIFI_FAIL_BIT) {
+        ESP_LOGI(TAG, "❌ WiFi连接失败: %s", WIFI_SSID);
+    } else {
+        ESP_LOGE(TAG, "意外事件");
+    }
+}
+
+/**
+ * @brief 连接WebSocket服务器
+ */
+static void websocket_connect(void)
+{
+    if (ws_client != NULL)
+    {
+        ESP_LOGW(TAG, "WebSocket客户端已存在");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "正在连接WebSocket服务器: %s", WS_URI);
+    
+    esp_websocket_client_config_t ws_cfg = {};
+    ws_cfg.uri = WS_URI;
+    ws_cfg.buffer_size = 8192;
+    
+    ws_client = esp_websocket_client_init(&ws_cfg);
+    esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, NULL);
+    esp_websocket_client_start(ws_client);
+    
+    // 等待连接
+    vTaskDelay(pdMS_TO_TICKS(500));
+    
+    if (esp_websocket_client_is_connected(ws_client))
+    {
+        ESP_LOGI(TAG, "✅ WebSocket连接成功");
+    }
+    else
+    {
+        ESP_LOGW(TAG, "⚠️ WebSocket连接可能未就绪");
+    }
+}
+
+/**
+ * @brief 断开WebSocket连接
+ */
+static void websocket_disconnect(void)
+{
+    if (ws_client != NULL)
+    {
+        ESP_LOGI(TAG, "正在断开WebSocket连接...");
+        esp_websocket_client_stop(ws_client);
+        esp_websocket_client_destroy(ws_client);
+        ws_client = NULL;
+        ESP_LOGI(TAG, "✅ WebSocket已断开");
+    }
+}
 
 /**
  * @brief 初始化外接LED GPIO
@@ -266,50 +582,9 @@ static const char *get_command_description(int command_id)
 }
 
 /**
- * @brief 发送音频数据到串口
- *
- * 将PCM音频数据编码为Base64并通过JSON格式发送
- * 
- * @param audio_data 音频数据缓冲区
- * @param data_size 音频数据大小（字节）
- * @param sequence 数据包序号
- */
-static void send_audio_data(const int16_t *audio_data, size_t data_size, uint32_t sequence)
-{
-    // Base64编码后的大小计算：(input_size + 2) / 3 * 4
-    size_t base64_size = ((data_size + 2) / 3) * 4 + 1; // +1 for null terminator
-    char *base64_buffer = (char *)malloc(base64_size);
-    
-    if (base64_buffer == NULL)
-    {
-        ESP_LOGE(TAG, "无法分配Base64缓冲区内存");
-        return;
-    }
-    
-    // 进行Base64编码
-    size_t output_len = 0;
-    int ret = mbedtls_base64_encode((unsigned char *)base64_buffer, base64_size,
-                                     &output_len, (const unsigned char *)audio_data, data_size);
-    
-    if (ret == 0)
-    {
-        // 发送JSON格式的音频数据包
-        printf("{\"event\":\"audio_data\",\"sequence\":%lu,\"size\":%zu,\"data\":\"%s\"}\n", 
-               (unsigned long)sequence, data_size, base64_buffer);
-        fflush(stdout);
-    }
-    else
-    {
-        ESP_LOGE(TAG, "Base64编码失败: %d", ret);
-    }
-    
-    free(base64_buffer);
-}
-
-/**
  * @brief 发送录音缓冲区的所有音频数据
  *
- * 将录音缓冲区分块发送，每块最大4KB
+ * 一次性发送完整的录音数据（二进制格式）
  */
 static void send_recorded_audio(void)
 {
@@ -319,103 +594,24 @@ static void send_recorded_audio(void)
         return;
     }
     
-    const size_t chunk_size = 4096; // 每个数据包最大4KB
-    const size_t chunk_samples = chunk_size / sizeof(int16_t);
-    size_t sent_samples = 0;
-    uint32_t sequence = 0;
+    if (ws_client == NULL || !esp_websocket_client_is_connected(ws_client))
+    {
+        ESP_LOGW(TAG, "WebSocket未连接，无法发送录音数据");
+        return;
+    }
     
+    size_t data_size = recording_length * sizeof(int16_t);
     ESP_LOGI(TAG, "开始发送录音数据，总大小: %zu 样本 (%.2f 秒), %zu 字节", 
-             recording_length, (float)recording_length / SAMPLE_RATE, 
-             recording_length * sizeof(int16_t));
+             recording_length, (float)recording_length / SAMPLE_RATE, data_size);
     
-    // 发送开始录音事件
-    printf("{\"event\":\"recording_started\",\"timestamp\":%lld}\n", 
-           (long long)esp_timer_get_time() / 1000);
-    fflush(stdout);
-    
-    // 分块发送音频数据
-    while (sent_samples < recording_length)
-    {
-        size_t samples_to_send = (recording_length - sent_samples > chunk_samples) 
-                                ? chunk_samples : (recording_length - sent_samples);
-        size_t bytes_to_send = samples_to_send * sizeof(int16_t);
-        
-        send_audio_data(&recording_buffer[sent_samples], bytes_to_send, sequence++);
-        sent_samples += samples_to_send;
-        
-        // 短暂延时，避免数据发送过快
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-    
-    // 发送结束录音事件
-    printf("{\"event\":\"recording_stopped\",\"timestamp\":%lld}\n", 
-           (long long)esp_timer_get_time() / 1000);
-    fflush(stdout);
-    
-    ESP_LOGI(TAG, "✅ 录音数据发送完成，共 %lu 个数据包", (unsigned long)sequence);
+    // 直接发送二进制PCM数据
+    esp_websocket_client_send_bin(ws_client, (const char *)recording_buffer, data_size, portMAX_DELAY);
+    ESP_LOGI(TAG, "✅ 录音数据发送完成（二进制格式）");
 }
 
-/**
- * @brief 处理接收到的音频响应数据
- *
- * @param base64_data Base64编码的音频数据
- * @param sequence 数据包序号
- */
-static void process_response_audio(const char *base64_data, uint32_t sequence)
-{
-    if (!is_receiving_response)
-    {
-        ESP_LOGW(TAG, "收到音频数据但未处于接收状态");
-        return;
-    }
-    
-    if (sequence != expected_response_sequence)
-    {
-        ESP_LOGW(TAG, "音频数据包序号不连续: 期望 %lu, 收到 %lu", 
-                 (unsigned long)expected_response_sequence, (unsigned long)sequence);
-    }
-    
-    // Base64解码
-    size_t output_size = 0;
-    unsigned char *decoded_data = NULL;
-    size_t input_len = strlen(base64_data);
-    size_t max_output_size = (input_len * 3) / 4 + 1;
-    
-    decoded_data = (unsigned char *)malloc(max_output_size);
-    if (decoded_data == NULL)
-    {
-        ESP_LOGE(TAG, "无法分配解码缓冲区");
-        return;
-    }
-    
-    int ret = mbedtls_base64_decode(decoded_data, max_output_size, &output_size,
-                                    (const unsigned char *)base64_data, input_len);
-    
-    if (ret == 0)
-    {
-        // 将解码后的数据添加到响应缓冲区
-        size_t samples_to_add = output_size / sizeof(int16_t);
-        if (response_length + samples_to_add <= RESPONSE_BUFFER_SIZE / sizeof(int16_t))
-        {
-            memcpy(&response_buffer[response_length], decoded_data, output_size);
-            response_length += samples_to_add;
-            ESP_LOGI(TAG, "📦 接收音频数据包 #%lu: %zu 字节, 总计: %zu 样本", 
-                     (unsigned long)sequence, output_size, response_length);
-        }
-        else
-        {
-            ESP_LOGW(TAG, "响应缓冲区已满，丢弃数据包");
-        }
-    }
-    else
-    {
-        ESP_LOGE(TAG, "Base64解码失败: %d", ret);
-    }
-    
-    free(decoded_data);
-    expected_response_sequence = sequence + 1;
-}
 
+// 注释掉不再需要的串口输入任务
+#if 0
 /**
  * @brief 串口输入处理任务
  *
@@ -524,6 +720,7 @@ static void uart_input_task(void *pvParameters)
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
+#endif
 
 /**
  * @brief 检测音频是否为静音
@@ -562,6 +759,9 @@ static void execute_exit_logic(void)
     {
         ESP_LOGE(TAG, "再见音频播放失败: %s", esp_err_to_name(audio_ret));
     }
+    
+    // 断开WebSocket连接
+    websocket_disconnect();
 
     current_state = STATE_WAITING_WAKEUP;
     ESP_LOGI(TAG, "返回等待唤醒状态，请说出唤醒词 '你好小智'");
@@ -575,14 +775,26 @@ static void execute_exit_logic(void)
  */
 extern "C" void app_main(void)
 {
-    // ========== 第一步：初始化外接LED ==========
+    // ========== 第一步：初始化NVS ==========
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+    
+    // ========== 第二步：初始化外接LED ==========
     init_led();
+    
+    // ========== 第三步：初始化WiFi ==========
+    ESP_LOGI(TAG, "正在连接WiFi...");
+    wifi_init_sta();
 
-    // ========== 第二步：初始化INMP441麦克风硬件 ==========
+    // ========== 第四步：初始化INMP441麦克风硬件 ==========
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
     ESP_LOGI(TAG, "音频参数: 采样率16kHz, 单声道, 16位深度");
 
-    esp_err_t ret = bsp_board_init(16000, 1, 16); // 16kHz, 单声道, 16位
+    ret = bsp_board_init(16000, 1, 16); // 16kHz, 单声道, 16位
     if (ret != ESP_OK)
     {
         ESP_LOGE(TAG, "INMP441麦克风初始化失败: %s", esp_err_to_name(ret));
@@ -760,8 +972,9 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "✓ 响应缓冲区分配成功，大小: %d 字节", RESPONSE_BUFFER_SIZE);
     
     // 创建串口输入处理任务
-    xTaskCreate(uart_input_task, "uart_input", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "✓ 串口输入任务已创建");
+    // 不再需要串口输入任务，改用WebSocket
+    // xTaskCreate(uart_input_task, "uart_input", 4096, NULL, 5, NULL);
+    ESP_LOGI(TAG, "✓ 使用WebSocket进行通信");
 
     // 显示系统配置信息
     ESP_LOGI(TAG, "✓ 智能语音助手系统配置完成:");
@@ -801,11 +1014,19 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "🎉 检测到唤醒词 '你好小智'！");
                 printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
                 
-                // 发送唤醒词检测事件
-                printf("{\"event\":\"wake_word_detected\",\"model\":\"%s\",\"timestamp\":%lld}\n", 
-                       model_name, 
-                       (long long)esp_timer_get_time() / 1000);
-                fflush(stdout);
+                // 连接WebSocket
+                websocket_connect();
+                
+                // 通过WebSocket发送唤醒词检测事件
+                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                {
+                    char wake_msg[256];
+                    snprintf(wake_msg, sizeof(wake_msg),
+                            "{\"event\":\"wake_word_detected\",\"model\":\"%s\",\"timestamp\":%lld}", 
+                            model_name, 
+                            (long long)esp_timer_get_time() / 1000);
+                    esp_websocket_client_send_text(ws_client, wake_msg, strlen(wake_msg), portMAX_DELAY);
+                }
 
                 // 播放欢迎音频
                 ESP_LOGI(TAG, "播放欢迎音频...");
@@ -852,24 +1073,10 @@ extern "C" void app_main(void)
                         ESP_LOGI(TAG, "正在发送录音数据到电脑...");
                         send_recorded_audio();
                         
-                        // 直接播放预设的响应音频（暂时绕过Python响应）
-                        ESP_LOGI(TAG, "播放预设响应音频...");
-                        esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 响应音频播放完成");
-                        }
-                        else
-                        {
-                            ESP_LOGE(TAG, "响应音频播放失败: %s", esp_err_to_name(audio_ret));
-                        }
-                        
-                        // 切换到命令词识别状态
-                        current_state = STATE_WAITING_COMMAND;
-                        command_timeout_start = xTaskGetTickCount();
-                        multinet->clean(mn_model_data);
-                        ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
-                        ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
+                        // 切换到等待响应状态
+                        current_state = STATE_WAITING_RESPONSE;
+                        response_played = false;  // 重置播放标志
+                        ESP_LOGI(TAG, "等待服务器响应音频...");
                     }
                 }
                 else
@@ -888,36 +1095,27 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "正在发送录音数据到电脑...");
                 send_recorded_audio();
                 
-                // 直接播放预设的响应音频（暂时绕过Python响应）
-                ESP_LOGI(TAG, "播放预设响应音频...");
-                esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
-                if (audio_ret == ESP_OK)
-                {
-                    ESP_LOGI(TAG, "✓ 响应音频播放完成");
-                }
-                else
-                {
-                    ESP_LOGE(TAG, "响应音频播放失败: %s", esp_err_to_name(audio_ret));
-                }
-                
-                // 切换到命令词识别状态
-                current_state = STATE_WAITING_COMMAND;
-                command_timeout_start = xTaskGetTickCount();
-                multinet->clean(mn_model_data);
-                ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
-                ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
+                // 切换到等待响应状态
+                current_state = STATE_WAITING_RESPONSE;
+                response_played = false;  // 重置播放标志
+                ESP_LOGI(TAG, "等待服务器响应音频...");
             }
         }
         else if (current_state == STATE_WAITING_RESPONSE)
         {
-            // 等待Python脚本响应音频
-            // 所有处理都在uart_input_task中完成
-            // 这里只是继续等待，不做超时处理
-            static int wait_count = 0;
-            if (++wait_count % 1000 == 0)  // 每秒显示一次
+            // 等待响应状态：等待WebSocket响应并播放
+            // 响应音频的播放在WebSocket事件处理器中完成
+            
+            // 检查是否已经播放完成
+            if (response_played)
             {
-                ESP_LOGI(TAG, "等待响应中... (is_receiving=%d, response_len=%zu)", 
-                         is_receiving_response, response_length);
+                // 响应已播放完成，切换到命令词识别状态
+                current_state = STATE_WAITING_COMMAND;
+                command_timeout_start = xTaskGetTickCount();
+                multinet->clean(mn_model_data);
+                response_played = false;  // 重置标志
+                ESP_LOGI(TAG, "进入命令词识别模式，请说出指令...");
+                ESP_LOGI(TAG, "支持的指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
             }
         }
         else if (current_state == STATE_WAITING_COMMAND)
