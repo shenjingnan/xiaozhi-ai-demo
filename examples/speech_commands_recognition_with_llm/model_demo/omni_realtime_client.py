@@ -10,9 +10,11 @@ import time
 from typing import Optional, Callable, List, Dict, Any
 from enum import Enum
 
+
 class TurnDetectionMode(Enum):
     SERVER_VAD = "server_vad"
     MANUAL = "manual"
+
 
 class OmniRealtimeClient:
     """
@@ -50,6 +52,7 @@ class OmniRealtimeClient:
             Additional event handlers.
             Is a mapping of event names to functions that process the event payload.
     """
+
     def __init__(
         self,
         base_url,
@@ -62,7 +65,9 @@ class OmniRealtimeClient:
         on_interrupt: Optional[Callable[[], None]] = None,
         on_input_transcript: Optional[Callable[[str], None]] = None,
         on_output_transcript: Optional[Callable[[str], None]] = None,
-        extra_event_handlers: Optional[Dict[str, Callable[[Dict[str, Any]], None]]] = None
+        extra_event_handlers: Optional[
+            Dict[str, Callable[[Dict[str, Any]], None]]
+        ] = None,
     ):
         self.base_url = base_url
         self.api_key = api_key
@@ -84,13 +89,32 @@ class OmniRealtimeClient:
         # Track printing state for input and output transcripts
         self._print_input_transcript = False
         self._output_transcript_buffer = ""
+        # Cache system prompt
+        self._system_prompt = None
+
+    def _load_system_prompt(self) -> str:
+        """Load system prompt from file, use cache if already loaded."""
+        if self._system_prompt is not None:
+            return self._system_prompt
+
+        default_prompt = ""
+        prompt_file_path = os.path.join(os.path.dirname(__file__), "system_prompt.md")
+
+        try:
+            with open(prompt_file_path, "r", encoding="utf-8") as f:
+                self._system_prompt = f.read().strip()
+                print(f"✅ 已加载系统提示词: {prompt_file_path}")
+        except Exception as e:
+            print(f"⚠️ 无法读取系统提示词文件 {prompt_file_path}: {e}")
+            print(f"   使用默认提示词")
+            self._system_prompt = default_prompt
+
+        return self._system_prompt
 
     async def connect(self) -> None:
         """Establish WebSocket connection with the Realtime API."""
         url = f"{self.base_url}?model={self.model}"
-        headers = {
-            "Authorization": f"Bearer {self.api_key}"
-        }
+        headers = {"Authorization": f"Bearer {self.api_key}"}
         print(f"url: {url}, headers: {headers}")
 
         # For compatibility with different websockets versions
@@ -103,46 +127,43 @@ class OmniRealtimeClient:
 
         # Set up default session configuration
         if self.turn_detection_mode == TurnDetectionMode.MANUAL:
-            await self.update_session({
-                "modalities": ["text", "audio"],
-                "voice": self.voice,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "gummy-realtime-v1"
-                },
-                "turn_detection" : None
-            })
-        elif self.turn_detection_mode == TurnDetectionMode.SERVER_VAD:
-            await self.update_session({
-                "modalities": ["text", "audio"],
-                "voice": self.voice,
-                "input_audio_format": "pcm16",
-                "output_audio_format": "pcm16",
-                "input_audio_transcription": {
-                    "model": "gummy-realtime-v1"
-                },
-                "turn_detection": {
-                    "type": "server_vad",
-                    "threshold": 0.1,
-                    "prefix_padding_ms": 500,
-                    "silence_duration_ms": 900
+            await self.update_session(
+                {
+                    "modalities": ["text", "audio"],
+                    "voice": self.voice,
+                    "input_audio_format": "pcm16",
+                    "output_audio_format": "pcm16",
+                    "input_audio_transcription": {"model": "gummy-realtime-v1"},
+                    "turn_detection": None,
                 }
-            })
+            )
+        elif self.turn_detection_mode == TurnDetectionMode.SERVER_VAD:
+            await self.update_session(
+                {
+                    "modalities": ["text", "audio"],
+                    "voice": self.voice,
+                    "input_audio_format": "pcm16",
+                    "output_audio_format": "pcm16",
+                    "input_audio_transcription": {"model": "gummy-realtime-v1"},
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.1,
+                        "prefix_padding_ms": 500,
+                        "silence_duration_ms": 900,
+                    },
+                }
+            )
         else:
             raise ValueError(f"Invalid turn detection mode: {self.turn_detection_mode}")
 
     async def send_event(self, event) -> None:
-        event['event_id'] = "event_" + str(int(time.time() * 1000))
+        event["event_id"] = "event_" + str(int(time.time() * 1000))
         print(f" Send event: type={event['type']}, event_id={event['event_id']}")
         await self.ws.send(json.dumps(event))
 
     async def update_session(self, config: Dict[str, Any]) -> None:
         """Update session configuration."""
-        event = {
-            "type": "session.update",
-            "session": config
-        }
+        event = {"type": "session.update", "session": config}
         print("update session: ", event)
         await self.send_event(event)
 
@@ -151,29 +172,26 @@ class OmniRealtimeClient:
         # only support 16bit 16kHz mono pcm
         audio_b64 = base64.b64encode(audio_chunk).decode()
 
-        append_event = {
-            "type": "input_audio_buffer.append",
-            "audio": audio_b64
-        }
+        append_event = {"type": "input_audio_buffer.append", "audio": audio_b64}
         await self.send_event(append_event)
 
     async def create_response(self) -> None:
         """Request a response from the API. Needed when using manual mode."""
+        system_prompt = self._load_system_prompt()
+
         event = {
             "type": "response.create",
             "response": {
-                "instructions": "你是Tom，一个美国的导购，负责售卖手机、电视",
-                "modalities": ["text", "audio"]
-            }
+                "instructions": system_prompt,
+                "modalities": ["text", "audio"],
+            },
         }
         print("create response: ", event)
         await self.send_event(event)
 
     async def cancel_response(self) -> None:
         """Cancel the current response."""
-        event = {
-            "type": "response.cancel"
-        }
+        event = {"type": "response.cancel"}
         await self.send_event(event)
 
     async def handle_interruption(self):
@@ -196,14 +214,14 @@ class OmniRealtimeClient:
             async for message in self.ws:
                 event = json.loads(message)
                 event_type = event.get("type")
-                
+
                 if event_type != "response.audio.delta":
                     print(" event: ", event)
                 else:
                     print(" event_type: ", event_type)
 
                 if event_type == "error":
-                    print(" Error: ", event['error'])
+                    print(" Error: ", event["error"])
                     continue
                 elif event_type == "response.created":
                     self._current_response_id = event.get("response", {}).get("id")
@@ -234,10 +252,13 @@ class OmniRealtimeClient:
                     if self.on_audio_delta:
                         audio_bytes = base64.b64decode(event["delta"])
                         self.on_audio_delta(audio_bytes)
-                elif event_type == "conversation.item.input_audio_transcription.completed":
+                elif (
+                    event_type
+                    == "conversation.item.input_audio_transcription.completed"
+                ):
                     transcript = event.get("transcript", "")
                     if self.on_input_transcript:
-                        await asyncio.to_thread(self.on_input_transcript,transcript)
+                        await asyncio.to_thread(self.on_input_transcript, transcript)
                         self._print_input_transcript = True
                 elif event_type == "response.audio_transcript.delta":
                     if self.on_output_transcript:
@@ -246,9 +267,12 @@ class OmniRealtimeClient:
                             self._output_transcript_buffer += delta
                         else:
                             if self._output_transcript_buffer:
-                                await asyncio.to_thread(self.on_output_transcript,self._output_transcript_buffer)
+                                await asyncio.to_thread(
+                                    self.on_output_transcript,
+                                    self._output_transcript_buffer,
+                                )
                                 self._output_transcript_buffer = ""
-                            await asyncio.to_thread(self.on_output_transcript,delta)
+                            await asyncio.to_thread(self.on_output_transcript, delta)
                 elif event_type == "response.audio_transcript.done":
                     self._print_input_transcript = False
                 elif event_type in self.extra_event_handlers:
