@@ -43,6 +43,7 @@ extern "C"
 #include "esp_mn_models.h"          // 命令词模型管理
 #include "esp_mn_speech_commands.h" // 命令词配置
 #include "esp_process_sdkconfig.h"  // sdkconfig处理函数
+#include "esp_vad.h"                // VAD接口
 #include "model_path.h"             // 模型路径定义
 #include "bsp_board.h"              // 板级支持包，INMP441麦克风驱动
 #include "esp_log.h"                // ESP日志系统
@@ -121,6 +122,9 @@ static model_iface_data_t *mn_model_data = NULL;
 static TickType_t command_timeout_start = 0;
 static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 
+// VAD（语音活动检测）相关变量
+static vad_handle_t vad_inst = NULL;
+
 // 音频参数
 #define SAMPLE_RATE 16000 // 采样率 16kHz
 
@@ -129,9 +133,11 @@ static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 static int16_t *recording_buffer = NULL;
 static size_t recording_length = 0;
 static bool is_recording = false;
-static int silence_frames = 0;
-static const int SILENCE_THRESHOLD = 200;      // 静音阈值
-static const int SILENCE_FRAMES_REQUIRED = 30; // 需要连续30帧静音才认为说话结束
+
+// VAD（语音活动检测）相关变量
+static bool vad_speech_detected = false;
+static int vad_silence_frames = 0;
+static const int VAD_SILENCE_FRAMES_REQUIRED = 20; // VAD检测到静音的帧数阈值（约600ms）
 
 // 接收音频相关变量
 #define RESPONSE_BUFFER_SIZE (1024 * 1024) // 1MB的音频数据 (可容纳约32秒的16kHz音频)
@@ -658,24 +664,6 @@ static void send_recorded_audio(void)
     ESP_LOGI(TAG, "✅ 录音数据发送完成（二进制格式）");
 }
 
-/**
- * @brief 检测音频是否为静音
- *
- * @param buffer 音频数据缓冲区
- * @param samples 样本数
- * @return true 如果是静音
- * @return false 如果不是静音
- */
-static bool is_silence(int16_t *buffer, int samples)
-{
-    int64_t sum = 0;
-    for (int i = 0; i < samples; i++)
-    {
-        sum += abs(buffer[i]);
-    }
-    int avg = sum / samples;
-    return avg < SILENCE_THRESHOLD;
-}
 
 /**
  * @brief 播放音频并自动停止I2S
@@ -768,7 +756,26 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 音频播放初始化成功");
 
-    // ========== 第四步：初始化语音识别模型 ==========
+    // ========== 第四步：初始化VAD（语音活动检测）==========
+    ESP_LOGI(TAG, "正在初始化语音活动检测（VAD）...");
+    
+    // 创建VAD实例，使用更精确的参数控制
+    // VAD_MODE_1: 中等灵敏度
+    // 16000Hz采样率，30ms帧长度，最小语音时长200ms，最小静音时长1000ms
+    vad_inst = vad_create_with_param(VAD_MODE_1, SAMPLE_RATE, 30, 200, 1000);
+    if (vad_inst == NULL) {
+        ESP_LOGE(TAG, "创建VAD实例失败");
+        return;
+    }
+    
+    ESP_LOGI(TAG, "✓ VAD初始化成功");
+    ESP_LOGI(TAG, "  - VAD模式: 1 (中等灵敏度)");
+    ESP_LOGI(TAG, "  - 采样率: %d Hz", SAMPLE_RATE);
+    ESP_LOGI(TAG, "  - 帧长度: 30 ms");
+    ESP_LOGI(TAG, "  - 最小语音时长: 200 ms");
+    ESP_LOGI(TAG, "  - 最小静音时长: 1000 ms");
+
+    // ========== 第五步：初始化语音识别模型 ==========
     ESP_LOGI(TAG, "正在初始化唤醒词检测模型...");
 
     // 检查内存状态
@@ -988,7 +995,10 @@ extern "C" void app_main(void)
                 current_state = STATE_RECORDING;
                 is_recording = true;
                 recording_length = 0;
-                silence_frames = 0;
+                vad_speech_detected = false;
+                vad_silence_frames = 0;
+                // 重置VAD触发器状态
+                vad_reset_trigger(vad_inst);
                 ESP_LOGI(TAG, "开始录音，请说话...");
             }
         }
@@ -1001,15 +1011,27 @@ extern "C" void app_main(void)
                 int samples = audio_chunksize / sizeof(int16_t);
                 memcpy(&recording_buffer[recording_length], buffer, audio_chunksize);
                 recording_length += samples;
-
-                // 检测静音
-                if (is_silence(buffer, samples))
-                {
-                    silence_frames++;
-                    if (silence_frames >= SILENCE_FRAMES_REQUIRED)
-                    {
-                        // 检测到持续静音，认为用户说完了
-                        ESP_LOGI(TAG, "检测到用户说话结束，录音长度: %zu 样本 (%.2f 秒)",
+                
+                // 使用VAD检测语音活动（使用30ms帧长度）
+                vad_state_t vad_state = vad_process(vad_inst, buffer, SAMPLE_RATE, 30);
+                
+                // 根据VAD状态处理
+                if (vad_state == VAD_SPEECH) {
+                    vad_speech_detected = true;
+                    vad_silence_frames = 0;
+                    // 显示录音进度（每100ms显示一次）
+                    static TickType_t last_log_time = 0;
+                    TickType_t current_time = xTaskGetTickCount();
+                    if (current_time - last_log_time > pdMS_TO_TICKS(100)) {
+                        ESP_LOGD(TAG, "正在录音... 当前长度: %.2f 秒", (float)recording_length / SAMPLE_RATE);
+                        last_log_time = current_time;
+                    }
+                } else if (vad_state == VAD_SILENCE && vad_speech_detected) {
+                    // 检测到静音，但必须先检测到过语音
+                    vad_silence_frames++;
+                    if (vad_silence_frames >= VAD_SILENCE_FRAMES_REQUIRED) {
+                        // VAD检测到持续静音，认为用户说完了
+                        ESP_LOGI(TAG, "VAD检测到用户说话结束，录音长度: %zu 样本 (%.2f 秒)",
                                  recording_length, (float)recording_length / SAMPLE_RATE);
                         is_recording = false;
 
@@ -1022,11 +1044,6 @@ extern "C" void app_main(void)
                         response_played = false; // 重置播放标志
                         ESP_LOGI(TAG, "等待服务器响应音频...");
                     }
-                }
-                else
-                {
-                    // 检测到声音，重置静音计数
-                    silence_frames = 0;
                 }
             }
             else if (recording_length >= RECORDING_BUFFER_SIZE / sizeof(int16_t))
@@ -1147,6 +1164,12 @@ extern "C" void app_main(void)
     // 注意：由于主循环是无限循环，以下代码正常情况下不会执行
     // 仅在程序异常退出时进行资源清理
     ESP_LOGI(TAG, "正在清理系统资源...");
+
+    // 销毁VAD实例
+    if (vad_inst != NULL)
+    {
+        vad_destroy(vad_inst);
+    }
 
     // 销毁唤醒词模型数据
     if (model_data != NULL)
