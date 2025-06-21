@@ -30,6 +30,7 @@ extern "C"
 #include "esp_log.h"       // ESP日志系统
 #include "driver/gpio.h"   // GPIO驱动
 #include "esp_timer.h"     // ESP定时器，用于获取时间戳
+#include "esp_vad.h"       // VAD语音活动检测接口
 }
 
 static const char *TAG = "唤醒词检测"; // 日志标签
@@ -177,7 +178,26 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "正在启动麦克风唤醒词检测...");
     ESP_LOGI(TAG, "请对着麦克风说出配置的唤醒词");
 
-    // ========== 第五步：主循环 - 实时音频采集与唤醒词检测 ==========
+    // ========== 第五步：初始化VAD（语音活动检测） ==========
+    ESP_LOGI(TAG, "正在初始化VAD语音活动检测...");
+    
+    // 创建VAD实例，使用默认参数
+    // VAD_MODE_0 是最宽松的模式，更容易检测到语音
+    vad_handle_t vad_inst = vad_create(VAD_MODE_0);
+    if (vad_inst == NULL)
+    {
+        ESP_LOGE(TAG, "VAD初始化失败！");
+        return;
+    }
+    ESP_LOGI(TAG, "✓ VAD初始化成功（使用默认配置）");
+
+    // ========== 第六步：状态变量初始化 ==========
+    bool is_recording = false;          // 是否正在录音
+    int silence_frames = 0;             // 静音帧计数
+    const int silence_threshold = 17;   // 静音阈值设为17帧（30ms * 17 ≈ 500ms）
+    bool has_speech = false;            // 是否已经检测到过语音
+
+    // ========== 第七步：主循环 - 实时音频采集与唤醒词检测 ==========
     while (1)
     {
         // 从INMP441麦克风获取一帧音频数据
@@ -212,6 +232,11 @@ extern "C" void app_main(void)
                    model_name, 
                    (long long)esp_timer_get_time() / 1000); // 转换为毫秒时间戳
             
+            // 发送开始录音消息
+            printf("开始录音\n");
+            printf("{\"event\":\"recording_started\",\"timestamp\":%lld}\n", 
+                   (long long)esp_timer_get_time() / 1000);
+            
             // 确保消息立即发送
             fflush(stdout);
 
@@ -219,8 +244,62 @@ extern "C" void app_main(void)
             ESP_LOGI(TAG, "💡 点亮外接LED指示唤醒词检测成功");
             led_blink(3, 500, 200);
 
-            // 这里可以添加唤醒后的处理逻辑
-            // 例如：启动语音识别、播放提示音、发送网络请求等
+            // 设置录音状态
+            ESP_LOGI(TAG, "📝 开始录音，等待用户说话...");
+            is_recording = true;
+            silence_frames = 0;
+            has_speech = false;
+        }
+
+        // 如果正在录音，进行VAD检测
+        if (is_recording)
+        {
+            // 使用VAD检测当前音频是否包含语音
+            // 使用默认参数进行处理
+            vad_state_t vad_state = vad_process(vad_inst, buffer, 16000, 30);
+            
+            if (vad_state == VAD_SPEECH)
+            {
+                // 检测到语音
+                has_speech = true;  // 标记已经检测到语音
+                silence_frames = 0; // 重置静音计数
+                ESP_LOGI(TAG, "检测到语音活动");
+            }
+            else
+            {
+                // 未检测到语音
+                // 只有在已经检测到过语音后，才开始计算静音时间
+                if (has_speech)
+                {
+                    silence_frames++;
+                    ESP_LOGI(TAG, "静音帧数: %d/%d", silence_frames, silence_threshold);
+                    
+                    // 如果静音时间超过阈值（500ms），结束录音
+                    if (silence_frames >= silence_threshold)
+                    {
+                        ESP_LOGI(TAG, "🛑 检测到用户停止说话，结束录音");
+                        
+                        // 发送结束录音消息
+                        printf("结束录音\n");
+                        printf("{\"event\":\"recording_stopped\",\"timestamp\":%lld}\n", 
+                               (long long)esp_timer_get_time() / 1000);
+                        fflush(stdout);
+                        
+                        // 重置录音状态
+                        is_recording = false;
+                        silence_frames = 0;
+                        has_speech = false;
+                        
+                        // LED快速闪烁2次表示录音结束
+                        led_blink(2, 200, 100);
+                    }
+                }
+                else
+                {
+                    // 还没检测到语音，继续等待
+                    ESP_LOGD(TAG, "等待用户开始说话...");
+                }
+            }
         }
 
         // 短暂延时，避免CPU占用过高，同时保证实时性
@@ -232,6 +311,12 @@ extern "C" void app_main(void)
     // 注意：由于主循环是无限循环，以下代码正常情况下不会执行
     // 仅在程序异常退出时进行资源清理
     ESP_LOGI(TAG, "正在清理系统资源...");
+
+    // 销毁VAD实例
+    if (vad_inst != NULL)
+    {
+        vad_destroy(vad_inst);
+    }
 
     // 销毁唤醒词模型数据
     if (model_data != NULL)
