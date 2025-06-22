@@ -12,6 +12,7 @@ set(requires
 idf_component_register(SRCS
                        main.cc
                        bsp_board.cc
+                       audio_manager.cc
                        INCLUDE_DIRS
                        "."
                        REQUIRES ${requires}

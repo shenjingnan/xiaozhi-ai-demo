@@ -60,6 +60,8 @@ extern "C"
 #include "esp_websocket_client.h"   // WebSocket客户端
 }
 
+#include "audio_manager.h"          // 音频管理器
+
 static const char *TAG = "语音识别"; // 日志标签
 
 // 外接LED GPIO定义
@@ -127,22 +129,13 @@ static vad_handle_t vad_inst = NULL;
 // 音频参数
 #define SAMPLE_RATE 16000 // 采样率 16kHz
 
-// 录音相关变量
-#define RECORDING_BUFFER_SIZE (SAMPLE_RATE * 10 * 2) // 10秒的音频数据 (16kHz * 10s * 2字节)
-static int16_t *recording_buffer = NULL;
-static size_t recording_length = 0;
-static bool is_recording = false;
+// 音频管理器
+static AudioManager* audio_manager = nullptr;
 
 // VAD（语音活动检测）相关变量
 static bool vad_speech_detected = false;
 static int vad_silence_frames = 0;
 static const int VAD_SILENCE_FRAMES_REQUIRED = 20; // VAD检测到静音的帧数阈值（约600ms）
-
-// 接收音频相关变量
-#define RESPONSE_BUFFER_SIZE (1024 * 1024) // 1MB的音频数据 (可容纳约32秒的16kHz音频)
-static int16_t *response_buffer = NULL;
-static size_t response_length = 0;
-static bool response_played = false; // 标记响应音频是否已播放
 
 // 连续对话相关变量
 static bool is_continuous_conversation = false;  // 是否处于连续对话模式
@@ -153,57 +146,6 @@ static bool user_started_speaking = false;  // 标记用户是否已经开始说
 // WiFi重试计数
 static int s_retry_num = 0;
 
-/**
- * @brief 处理接收到的完整音频响应数据
- *
- * @param audio_data 二进制PCM音频数据
- * @param data_size 数据大小（字节）
- */
-static void process_response_audio(const uint8_t *audio_data, size_t data_size)
-{
-    // 将数据复制到响应缓冲区
-    response_length = data_size / sizeof(int16_t);
-    if (response_length <= RESPONSE_BUFFER_SIZE / sizeof(int16_t))
-    {
-        memcpy(response_buffer, audio_data, data_size);
-        ESP_LOGI(TAG, "📦 接收到完整音频数据: %zu 字节, %zu 样本", data_size, response_length);
-
-        // 立即播放音频
-        ESP_LOGI(TAG, "📢 播放响应音频: %zu 样本 (%.2f 秒)",
-                 response_length, (float)response_length / SAMPLE_RATE);
-
-        // 添加重试机制确保音频播放完整
-        int retry_count = 0;
-        const int max_retries = 3;
-        esp_err_t audio_ret = ESP_FAIL;
-
-        while (retry_count < max_retries && audio_ret != ESP_OK)
-        {
-            audio_ret = bsp_play_audio((const uint8_t *)response_buffer, response_length * sizeof(int16_t));
-            if (audio_ret == ESP_OK)
-            {
-                ESP_LOGI(TAG, "✅ 响应音频播放完成");
-                response_played = true;
-                break;
-            }
-            else
-            {
-                ESP_LOGE(TAG, "❌ 音频数据写入失败 (尝试 %d/%d): %s",
-                         retry_count + 1, max_retries, esp_err_to_name(audio_ret));
-                retry_count++;
-                if (retry_count < max_retries)
-                {
-                    vTaskDelay(pdMS_TO_TICKS(100)); // 等待100ms后重试
-                }
-            }
-        }
-    }
-    else
-    {
-        ESP_LOGW(TAG, "响应音频数据过大 (%zu 样本)，超过缓冲区限制 (%d 样本)",
-                 response_length, RESPONSE_BUFFER_SIZE / sizeof(int16_t));
-    }
-}
 
 /**
  * @brief WiFi事件处理器
@@ -257,119 +199,28 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
 
     case WEBSOCKET_EVENT_DATA:
     {
-        // 静态缓冲区用于累积二进制音频数据
-        static uint8_t *audio_buffer = NULL;
-        static size_t audio_buffer_size = 0;
-        static size_t audio_buffer_len = 0;
-        static const size_t MAX_AUDIO_SIZE = 1024 * 1024; // 最大1MB的音频数据
-        static bool receiving_audio = false;
-        static TickType_t last_audio_time = 0;
-
         ESP_LOGI(TAG, "收到WebSocket数据，长度: %d 字节, op_code: 0x%02x", data->data_len, data->op_code);
 
-        // 检查是否是完整的数据包
-        if (data->op_code == 0x08 && data->data_len == 2)
-        {
-            // WebSocket关闭帧
-            ESP_LOGI(TAG, "收到WebSocket关闭帧");
-            break;
-        }
-
-        // 二进制数据处理 (op_code == 0x02 表示二进制帧)
-        if (data->op_code == 0x02 && data->data_len > 0)
-        {
-            // 如果这是第一个二进制数据包
-            if (!receiving_audio)
-            {
-                ESP_LOGI(TAG, "开始接收二进制音频数据");
-                receiving_audio = true;
-
-                // 分配缓冲区
-                if (audio_buffer)
-                {
-                    free(audio_buffer);
-                }
-                audio_buffer_size = MAX_AUDIO_SIZE;
-                audio_buffer = (uint8_t *)calloc(audio_buffer_size, 1);
-                if (!audio_buffer)
-                {
-                    ESP_LOGE(TAG, "无法分配音频缓冲区");
-                    receiving_audio = false;
-                    break;
-                }
-                audio_buffer_len = 0;
-            }
-
-            // 累积音频数据
-            if (audio_buffer && (audio_buffer_len + data->data_len) <= audio_buffer_size)
-            {
-                memcpy(audio_buffer + audio_buffer_len, data->data_ptr, data->data_len);
-                audio_buffer_len += data->data_len;
-                last_audio_time = xTaskGetTickCount();
-
-                // 每累积10KB显示一次进度
-                if (audio_buffer_len % 10240 < data->data_len)
-                {
-                    ESP_LOGI(TAG, "累积音频数据: %zu KB", audio_buffer_len / 1024);
-                }
+        // 使用AudioManager处理WebSocket音频数据
+        if (audio_manager != nullptr) {
+            bool audio_complete = audio_manager->processWebSocketData(
+                data->op_code, 
+                (const uint8_t*)data->data_ptr, 
+                data->data_len,
+                current_state == STATE_WAITING_RESPONSE
+            );
+            
+            // 如果音频处理完成，更新响应播放标志
+            if (audio_complete && current_state == STATE_WAITING_RESPONSE) {
+                // 音频已在processWebSocketData中播放
             }
         }
-        // 检测音频传输结束（收到ping包）
-        else if (data->op_code == 0x09)
-        { // ping帧
-            ESP_LOGI(TAG, "收到ping包，检查是否有待播放的音频");
-
-            if (receiving_audio && audio_buffer && audio_buffer_len > 0)
-            {
-                ESP_LOGI(TAG, "音频数据接收完成，总大小: %zu 字节 (%.2f 秒)",
-                         audio_buffer_len, (float)audio_buffer_len / 2 / SAMPLE_RATE);
-                receiving_audio = false;
-
-                // 播放累积的音频数据
-                if (current_state == STATE_WAITING_RESPONSE)
-                {
-                    process_response_audio(audio_buffer, audio_buffer_len);
-                }
-
-                // 清理缓冲区
-                free(audio_buffer);
-                audio_buffer = NULL;
-                audio_buffer_size = 0;
-                audio_buffer_len = 0;
-            }
-        }
-        // 超时检测（如果500ms没有新数据，认为传输结束）
-        else if (receiving_audio && last_audio_time > 0 &&
-                 (xTaskGetTickCount() - last_audio_time) > pdMS_TO_TICKS(500))
-        {
-            ESP_LOGI(TAG, "音频数据接收超时，准备播放");
-            receiving_audio = false;
-
-            // 播放累积的音频数据
-            if (audio_buffer && audio_buffer_len > 0 && current_state == STATE_WAITING_RESPONSE)
-            {
-                ESP_LOGI(TAG, "音频数据接收完成（超时），总大小: %zu 字节 (%.2f 秒)",
-                         audio_buffer_len, (float)audio_buffer_len / 2 / SAMPLE_RATE);
-                process_response_audio(audio_buffer, audio_buffer_len);
-            }
-
-            // 清理缓冲区
-            if (audio_buffer)
-            {
-                free(audio_buffer);
-                audio_buffer = NULL;
-                audio_buffer_size = 0;
-                audio_buffer_len = 0;
-            }
-            last_audio_time = 0;
-        }
+        
         // JSON数据处理（用于其他事件）
-        else if (data->data_ptr && data->data_len > 0 && data->data_ptr[0] == '{')
-        {
+        if (data->data_ptr && data->data_len > 0 && data->data_ptr[0] == '{') {
             // 创建临时缓冲区
             char *json_str = (char *)malloc(data->data_len + 1);
-            if (json_str)
-            {
+            if (json_str) {
                 memcpy(json_str, data->data_ptr, data->data_len);
                 json_str[data->data_len] = '\0';
                 ESP_LOGI(TAG, "收到JSON消息: %s", json_str);
@@ -648,6 +499,14 @@ static const char *get_command_description(int command_id)
  */
 static void send_recorded_audio(void)
 {
+    if (audio_manager == nullptr) {
+        ESP_LOGW(TAG, "音频管理器未初始化");
+        return;
+    }
+    
+    size_t recording_length = 0;
+    const int16_t* recording_buffer = audio_manager->getRecordingBuffer(recording_length);
+    
     if (recording_buffer == NULL || recording_length == 0)
     {
         ESP_LOGW(TAG, "没有录音数据可发送");
@@ -671,7 +530,7 @@ static void send_recorded_audio(void)
 
 
 /**
- * @brief 播放音频并自动停止I2S
+ * @brief 播放音频的包装函数
  *
  * @param audio_data 音频数据
  * @param data_len 数据长度
@@ -680,17 +539,10 @@ static void send_recorded_audio(void)
  */
 static esp_err_t play_audio_with_stop(const uint8_t *audio_data, size_t data_len, const char *description)
 {
-    ESP_LOGI(TAG, "播放%s...", description);
-    esp_err_t ret = bsp_play_audio(audio_data, data_len);
-    if (ret == ESP_OK)
-    {
-        ESP_LOGI(TAG, "✓ %s播放成功", description);
+    if (audio_manager != nullptr) {
+        return audio_manager->playAudio(audio_data, data_len, description);
     }
-    else
-    {
-        ESP_LOGE(TAG, "%s播放失败: %s", description, esp_err_to_name(ret));
-    }
-    return ret;
+    return ESP_ERR_INVALID_STATE;
 }
 
 /**
@@ -709,7 +561,10 @@ static void execute_exit_logic(void)
 
     // 重置所有状态
     current_state = STATE_WAITING_WAKEUP;
-    is_recording = false;
+    if (audio_manager != nullptr) {
+        audio_manager->stopRecording();
+        audio_manager->clearRecordingBuffer();
+    }
     is_continuous_conversation = false;
     user_started_speaking = false;
     recording_timeout_start = 0;
@@ -922,26 +777,18 @@ extern "C" void app_main(void)
         return;
     }
 
-    // 分配录音缓冲区
-    recording_buffer = (int16_t *)malloc(RECORDING_BUFFER_SIZE);
-    if (recording_buffer == NULL)
+    // 初始化音频管理器
+    audio_manager = new AudioManager(SAMPLE_RATE, 10, 32);  // 16kHz, 10秒录音, 32秒响应
+    ret = audio_manager->init();
+    if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "录音缓冲区内存分配失败，需要 %d 字节", RECORDING_BUFFER_SIZE);
+        ESP_LOGE(TAG, "音频管理器初始化失败: %s", esp_err_to_name(ret));
         free(buffer);
+        delete audio_manager;
+        audio_manager = nullptr;
         return;
     }
-    ESP_LOGI(TAG, "✓ 录音缓冲区分配成功，大小: %d 字节", RECORDING_BUFFER_SIZE);
-
-    // 分配响应音频缓冲区（使用calloc确保初始化为0）
-    response_buffer = (int16_t *)calloc(RESPONSE_BUFFER_SIZE / sizeof(int16_t), sizeof(int16_t));
-    if (response_buffer == NULL)
-    {
-        ESP_LOGE(TAG, "响应缓冲区内存分配失败，需要 %d 字节", RESPONSE_BUFFER_SIZE);
-        free(buffer);
-        free(recording_buffer);
-        return;
-    }
-    ESP_LOGI(TAG, "✓ 响应缓冲区分配成功，大小: %d 字节（已初始化为0）", RESPONSE_BUFFER_SIZE);
+    ESP_LOGI(TAG, "✓ 音频管理器初始化成功");
 
     // 创建串口输入处理任务
     // 不再需要串口输入任务，改用WebSocket
@@ -1006,8 +853,7 @@ extern "C" void app_main(void)
 
                 // 切换到录音状态
                 current_state = STATE_RECORDING;
-                is_recording = true;
-                recording_length = 0;
+                audio_manager->startRecording();
                 vad_speech_detected = false;
                 vad_silence_frames = 0;
                 is_continuous_conversation = false;  // 第一次录音，不是连续对话
@@ -1023,12 +869,11 @@ extern "C" void app_main(void)
         else if (current_state == STATE_RECORDING)
         {
             // 录音阶段：录制用户说话内容
-            if (is_recording && recording_length < RECORDING_BUFFER_SIZE / sizeof(int16_t))
+            if (audio_manager->isRecording() && !audio_manager->isRecordingBufferFull())
             {
                 // 将音频数据存入录音缓冲区
                 int samples = audio_chunksize / sizeof(int16_t);
-                memcpy(&recording_buffer[recording_length], buffer, audio_chunksize);
-                recording_length += samples;
+                audio_manager->addRecordingData(buffer, samples);
                 
                 // 如果是连续对话模式，同时进行命令词检测
                 if (is_continuous_conversation)
@@ -1048,7 +893,7 @@ extern "C" void app_main(void)
                                      command_id, prob, mn_result->string, cmd_desc);
                             
                             // 停止录音
-                            is_recording = false;
+                            audio_manager->stopRecording();
                             
                             // 直接处理命令，不发送到服务器
                             if (command_id == COMMAND_TURN_ON_LIGHT)
@@ -1057,8 +902,8 @@ extern "C" void app_main(void)
                                 led_turn_on();
                                 play_audio_with_stop(ok, ok_len, "开灯确认音频");
                                 // 继续保持连续对话模式
-                                is_recording = true;
-                                recording_length = 0;
+                                audio_manager->clearRecordingBuffer();
+                                audio_manager->startRecording();
                                 vad_speech_detected = false;
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
@@ -1074,8 +919,8 @@ extern "C" void app_main(void)
                                 led_turn_off();
                                 play_audio_with_stop(ok, ok_len, "关灯确认音频");
                                 // 继续保持连续对话模式
-                                is_recording = true;
-                                recording_length = 0;
+                                audio_manager->clearRecordingBuffer();
+                                audio_manager->startRecording();
                                 vad_speech_detected = false;
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
@@ -1096,8 +941,8 @@ extern "C" void app_main(void)
                                 ESP_LOGI(TAG, "💡 执行自定义命令词");
                                 play_audio_with_stop(custom, custom_len, "自定义确认音频");
                                 // 继续保持连续对话模式
-                                is_recording = true;
-                                recording_length = 0;
+                                audio_manager->clearRecordingBuffer();
+                                audio_manager->startRecording();
                                 vad_speech_detected = false;
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
@@ -1124,7 +969,7 @@ extern "C" void app_main(void)
                     static TickType_t last_log_time = 0;
                     TickType_t current_time = xTaskGetTickCount();
                     if (current_time - last_log_time > pdMS_TO_TICKS(100)) {
-                        ESP_LOGD(TAG, "正在录音... 当前长度: %.2f 秒", (float)recording_length / SAMPLE_RATE);
+                        ESP_LOGD(TAG, "正在录音... 当前长度: %.2f 秒", audio_manager->getRecordingDuration());
                         last_log_time = current_time;
                     }
                 } else if (vad_state == VAD_SILENCE && vad_speech_detected) {
@@ -1132,12 +977,14 @@ extern "C" void app_main(void)
                     vad_silence_frames++;
                     if (vad_silence_frames >= VAD_SILENCE_FRAMES_REQUIRED) {
                         // VAD检测到持续静音，认为用户说完了
-                        ESP_LOGI(TAG, "VAD检测到用户说话结束，录音长度: %zu 样本 (%.2f 秒)",
-                                 recording_length, (float)recording_length / SAMPLE_RATE);
-                        is_recording = false;
+                        ESP_LOGI(TAG, "VAD检测到用户说话结束，录音长度: %.2f 秒",
+                                 audio_manager->getRecordingDuration());
+                        audio_manager->stopRecording();
 
                         // 只有在用户确实说话了才发送数据
-                        if (user_started_speaking && recording_length > SAMPLE_RATE / 4) // 至少0.25秒的音频
+                        size_t rec_len = 0;
+                        audio_manager->getRecordingBuffer(rec_len);
+                        if (user_started_speaking && rec_len > SAMPLE_RATE / 4) // 至少0.25秒的音频
                         {
                             // 发送录音数据到Python脚本
                             ESP_LOGI(TAG, "正在发送录音数据到电脑...");
@@ -1145,15 +992,15 @@ extern "C" void app_main(void)
 
                             // 切换到等待响应状态
                             current_state = STATE_WAITING_RESPONSE;
-                            response_played = false; // 重置播放标志
+                            audio_manager->resetResponsePlayedFlag(); // 重置播放标志
                             ESP_LOGI(TAG, "等待服务器响应音频...");
                         }
                         else
                         {
                             ESP_LOGI(TAG, "录音时间过短或用户未说话，重新开始录音");
                             // 重新开始录音
-                            is_recording = true;
-                            recording_length = 0;
+                            audio_manager->clearRecordingBuffer();
+                            audio_manager->startRecording();
                             vad_speech_detected = false;
                             vad_silence_frames = 0;
                             user_started_speaking = false;
@@ -1167,11 +1014,11 @@ extern "C" void app_main(void)
                     }
                 }
             }
-            else if (recording_length >= RECORDING_BUFFER_SIZE / sizeof(int16_t))
+            else if (audio_manager->isRecordingBufferFull())
             {
                 // 录音缓冲区满了，强制停止录音
                 ESP_LOGW(TAG, "录音缓冲区已满，停止录音");
-                is_recording = false;
+                audio_manager->stopRecording();
 
                 // 发送录音数据到Python脚本
                 ESP_LOGI(TAG, "正在发送录音数据到电脑...");
@@ -1179,7 +1026,7 @@ extern "C" void app_main(void)
 
                 // 切换到等待响应状态
                 current_state = STATE_WAITING_RESPONSE;
-                response_played = false; // 重置播放标志
+                audio_manager->resetResponsePlayedFlag(); // 重置播放标志
                 ESP_LOGI(TAG, "等待服务器响应音频...");
             }
             
@@ -1190,7 +1037,7 @@ extern "C" void app_main(void)
                 if ((current_time - recording_timeout_start) > pdMS_TO_TICKS(RECORDING_TIMEOUT_MS))
                 {
                     ESP_LOGW(TAG, "⏰ 连续对话录音超时，用户未说话");
-                    is_recording = false;
+                    audio_manager->stopRecording();
                     execute_exit_logic();
                 }
                 // 每秒提示一次剩余时间
@@ -1212,18 +1059,18 @@ extern "C" void app_main(void)
             // 响应音频的播放在WebSocket事件处理器中完成
 
             // 检查是否已经播放完成
-            if (response_played)
+            if (audio_manager->isResponsePlayed())
             {
                 // 响应已播放完成，重新进入录音状态（连续对话）
                 current_state = STATE_RECORDING;
-                is_recording = true;
-                recording_length = 0;
+                audio_manager->clearRecordingBuffer();
+                audio_manager->startRecording();
                 vad_speech_detected = false;
                 vad_silence_frames = 0;
                 is_continuous_conversation = true;  // 标记为连续对话模式
                 user_started_speaking = false;
                 recording_timeout_start = xTaskGetTickCount();  // 开始超时计时
-                response_played = false; // 重置标志
+                audio_manager->resetResponsePlayedFlag(); // 重置标志
                 // 重置VAD触发器状态
                 vad_reset_trigger(vad_inst);
                 // 重置命令词识别缓冲区
@@ -1336,16 +1183,11 @@ extern "C" void app_main(void)
         free(buffer);
     }
 
-    // 释放录音缓冲区内存
-    if (recording_buffer != NULL)
+    // 释放音频管理器
+    if (audio_manager != nullptr)
     {
-        free(recording_buffer);
-    }
-
-    // 释放响应缓冲区内存
-    if (response_buffer != NULL)
-    {
-        free(response_buffer);
+        delete audio_manager;
+        audio_manager = nullptr;
     }
 
     // 删除当前任务
