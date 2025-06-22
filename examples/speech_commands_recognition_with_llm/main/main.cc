@@ -44,6 +44,8 @@ extern "C"
 #include "esp_mn_speech_commands.h" // 命令词配置
 #include "esp_process_sdkconfig.h"  // sdkconfig处理函数
 #include "esp_vad.h"                // VAD接口
+#include "esp_nsn_iface.h"          // 噪音抑制接口
+#include "esp_nsn_models.h"         // 噪音抑制模型
 #include "model_path.h"             // 模型路径定义
 #include "bsp_board.h"              // 板级支持包，INMP441麦克风驱动
 #include "esp_log.h"                // ESP日志系统
@@ -125,6 +127,10 @@ static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 
 // VAD（语音活动检测）相关变量
 static vad_handle_t vad_inst = NULL;
+
+// NS（噪音抑制）相关变量  
+static esp_nsn_iface_t *nsn_handle = NULL;
+static esp_nsn_data_t *nsn_model_data = NULL;
 
 // 音频参数
 #define SAMPLE_RATE 16000 // 采样率 16kHz
@@ -877,6 +883,33 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 命令词配置完成");
 
+    // ========== 初始化噪音抑制 ==========
+    ESP_LOGI(TAG, "正在初始化噪音抑制模块...");
+    
+    // 获取噪音抑制模型
+    char *nsn_model_name = esp_srmodel_filter(models, ESP_NSNET_PREFIX, NULL);
+    if (nsn_model_name == NULL) {
+        ESP_LOGW(TAG, "未找到噪音抑制模型，将不使用噪音抑制");
+    } else {
+        ESP_LOGI(TAG, "✓ 选择噪音抑制模型: %s", nsn_model_name);
+        
+        // 获取噪音抑制接口
+        nsn_handle = (esp_nsn_iface_t *)esp_nsnet_handle_from_name(nsn_model_name);
+        if (nsn_handle == NULL) {
+            ESP_LOGW(TAG, "获取噪音抑制接口失败");
+        } else {
+            // 创建噪音抑制实例
+            nsn_model_data = nsn_handle->create(nsn_model_name);
+            if (nsn_model_data == NULL) {
+                ESP_LOGW(TAG, "创建噪音抑制实例失败");
+            } else {
+                ESP_LOGI(TAG, "✓ 噪音抑制初始化成功");
+                ESP_LOGI(TAG, "  - 噪音抑制模型: %s", nsn_model_name);
+                ESP_LOGI(TAG, "  - 采样率: %d Hz", SAMPLE_RATE);
+            }
+        }
+    }
+
     // ========== 第六步：准备音频缓冲区 ==========
     // 获取模型要求的音频数据块大小（样本数 × 每样本字节数）
     int audio_chunksize = wakenet->get_samp_chunksize(model_data) * sizeof(int16_t);
@@ -913,6 +946,7 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "  - 唤醒词模型: %s", model_name);
     ESP_LOGI(TAG, "  - 命令词模型: %s", mn_name);
     ESP_LOGI(TAG, "  - 音频块大小: %d 字节", audio_chunksize);
+    ESP_LOGI(TAG, "  - 噪音抑制: %s", (nsn_model_data != NULL) ? "已启用" : "未启用");
     ESP_LOGI(TAG, "  - 检测置信度: 90%%");
     ESP_LOGI(TAG, "正在启动智能语音助手...");
     ESP_LOGI(TAG, "请对着麦克风说出唤醒词 '你好小智'");
@@ -936,10 +970,31 @@ extern "C" void app_main(void)
             continue;
         }
 
+        // 如果启用了噪音抑制，先对音频数据进行噪音抑制处理
+        int16_t *processed_audio = buffer;
+        static int16_t *ns_out_buffer = NULL;  // 噪音抑制输出缓冲区
+        if (nsn_handle != NULL && nsn_model_data != NULL) {
+            // 如果输出缓冲区未分配，分配它
+            if (ns_out_buffer == NULL) {
+                int ns_chunksize = nsn_handle->get_samp_chunksize(nsn_model_data);
+                ns_out_buffer = (int16_t *)malloc(ns_chunksize * sizeof(int16_t));
+                if (ns_out_buffer == NULL) {
+                    ESP_LOGW(TAG, "噪音抑制输出缓冲区分配失败");
+                    nsn_handle = NULL;  // 禁用噪音抑制
+                }
+            }
+            
+            if (ns_out_buffer != NULL) {
+                // 执行噪音抑制
+                nsn_handle->process(nsn_model_data, buffer, ns_out_buffer);
+                processed_audio = ns_out_buffer;  // 使用噪音抑制后的数据
+            }
+        }
+
         if (current_state == STATE_WAITING_WAKEUP)
         {
             // 第一阶段：唤醒词检测
-            wakenet_state_t wn_state = wakenet->detect(model_data, buffer);
+            wakenet_state_t wn_state = wakenet->detect(model_data, processed_audio);
 
             if (wn_state == WAKENET_DETECTED)
             {
@@ -986,12 +1041,12 @@ extern "C" void app_main(void)
             {
                 // 将音频数据存入录音缓冲区
                 int samples = audio_chunksize / sizeof(int16_t);
-                audio_manager->addRecordingData(buffer, samples);
+                audio_manager->addRecordingData(processed_audio, samples);
                 
                 // 如果是连续对话模式，同时进行命令词检测
                 if (is_continuous_conversation)
                 {
-                    esp_mn_state_t mn_state = multinet->detect(mn_model_data, buffer);
+                    esp_mn_state_t mn_state = multinet->detect(mn_model_data, processed_audio);
                     if (mn_state == ESP_MN_STATE_DETECTED)
                     {
                         // 获取识别结果
@@ -1070,7 +1125,7 @@ extern "C" void app_main(void)
                 }
                 
                 // 使用VAD检测语音活动（使用30ms帧长度）
-                vad_state_t vad_state = vad_process(vad_inst, buffer, SAMPLE_RATE, 30);
+                vad_state_t vad_state = vad_process(vad_inst, processed_audio, SAMPLE_RATE, 30);
                 
                 // 根据VAD状态处理
                 if (vad_state == VAD_SPEECH) {
@@ -1207,7 +1262,7 @@ extern "C" void app_main(void)
         else if (current_state == STATE_WAITING_COMMAND)
         {
             // 第二阶段：命令词识别
-            esp_mn_state_t mn_state = multinet->detect(mn_model_data, buffer);
+            esp_mn_state_t mn_state = multinet->detect(mn_model_data, processed_audio);
 
             if (mn_state == ESP_MN_STATE_DETECTED)
             {
@@ -1289,6 +1344,12 @@ extern "C" void app_main(void)
     // 注意：由于主循环是无限循环，以下代码正常情况下不会执行
     // 仅在程序异常退出时进行资源清理
     ESP_LOGI(TAG, "正在清理系统资源...");
+
+    // 销毁噪音抑制实例
+    if (nsn_model_data != NULL && nsn_handle != NULL)
+    {
+        nsn_handle->destroy(nsn_model_data);
+    }
 
     // 销毁VAD实例
     if (vad_inst != NULL)
