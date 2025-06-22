@@ -420,6 +420,86 @@ static void led_turn_off(void)
     ESP_LOGI(TAG, "外接LED熄灭");
 }
 
+// 全局变量：记录已发送的音频位置
+static size_t audio_sent_position = 0;
+static bool is_streaming_audio = false;
+static TickType_t last_chunk_send_time = 0;
+
+/**
+ * @brief 流式发送录音数据块到WebSocket服务器
+ *
+ * 每次发送3200字节（200ms的音频数据）
+ * @return true 如果还有数据要发送，false 如果发送完成
+ */
+static bool send_audio_chunk(void)
+{
+    if (audio_manager == nullptr) {
+        ESP_LOGW(TAG, "音频管理器未初始化");
+        return false;
+    }
+    
+    size_t recording_length = 0;
+    const int16_t* recording_buffer = audio_manager->getRecordingBuffer(recording_length);
+    
+    if (recording_buffer == NULL || recording_length == 0)
+    {
+        return false;
+    }
+
+    if (ws_client == NULL || !esp_websocket_client_is_connected(ws_client))
+    {
+        ESP_LOGW(TAG, "WebSocket未连接，无法发送录音数据");
+        return false;
+    }
+
+    // 计算剩余的数据量
+    size_t remaining_samples = recording_length - audio_sent_position;
+    if (remaining_samples == 0) {
+        return false;  // 没有更多数据
+    }
+
+    // 每次发送3200字节（1600个16位样本）
+    const size_t CHUNK_SAMPLES = 1600;  // 3200字节 / 2字节每样本
+    size_t samples_to_send = (remaining_samples > CHUNK_SAMPLES) ? CHUNK_SAMPLES : remaining_samples;
+    size_t bytes_to_send = samples_to_send * sizeof(int16_t);
+
+    // 发送数据块
+    const char* data_ptr = (const char*)(recording_buffer + audio_sent_position);
+    esp_websocket_client_send_bin(ws_client, data_ptr, bytes_to_send, portMAX_DELAY);
+    
+    audio_sent_position += samples_to_send;
+    last_chunk_send_time = xTaskGetTickCount();
+    
+    ESP_LOGD(TAG, "发送音频块: %zu 字节, 进度: %zu/%zu 样本", 
+             bytes_to_send, audio_sent_position, recording_length);
+
+    // 如果是第一次发送，记录日志
+    if (audio_sent_position == samples_to_send) {
+        ESP_LOGI(TAG, "开始流式发送录音数据...");
+    }
+
+    // 检查是否发送完成
+    if (audio_sent_position >= recording_length) {
+        ESP_LOGI(TAG, "✅ 录音数据流式发送完成，总计: %zu 样本 (%.2f 秒)", 
+                 recording_length, (float)recording_length / SAMPLE_RATE);
+        audio_sent_position = 0;  // 重置位置
+        is_streaming_audio = false;
+        return false;  // 发送完成
+    }
+
+    return true;  // 还有数据要发送
+}
+
+/**
+ * @brief 开始流式发送录音数据
+ */
+static void start_streaming_audio(void)
+{
+    audio_sent_position = 0;
+    is_streaming_audio = true;
+    last_chunk_send_time = xTaskGetTickCount();
+}
+
 /**
  * @brief 配置自定义命令词
  *
@@ -1019,10 +1099,10 @@ extern "C" void app_main(void)
                         audio_manager->getRecordingBuffer(rec_len);
                         if (user_started_speaking && rec_len > SAMPLE_RATE / 4) // 至少0.25秒的音频
                         {
-                            // 发送录音数据到Python脚本
+                            // 发送录音数据到Python脚本（使用流式发送）
                             ESP_LOGI(TAG, "正在发送录音数据到电脑...");
-                            send_recorded_audio();
-
+                            start_streaming_audio();  // 初始化流式发送
+                            
                             // 切换到等待响应状态
                             current_state = STATE_WAITING_RESPONSE;
                             audio_manager->resetResponsePlayedFlag(); // 重置播放标志
@@ -1053,9 +1133,9 @@ extern "C" void app_main(void)
                 ESP_LOGW(TAG, "录音缓冲区已满，停止录音");
                 audio_manager->stopRecording();
 
-                // 发送录音数据到Python脚本
+                // 发送录音数据到Python脚本（使用流式发送）
                 ESP_LOGI(TAG, "正在发送录音数据到电脑...");
-                send_recorded_audio();
+                start_streaming_audio();  // 初始化流式发送
 
                 // 切换到等待响应状态
                 current_state = STATE_WAITING_RESPONSE;
@@ -1088,9 +1168,21 @@ extern "C" void app_main(void)
         }
         else if (current_state == STATE_WAITING_RESPONSE)
         {
-            // 等待响应状态：等待WebSocket响应并播放
+            // 等待响应状态：流式发送音频并等待响应
+            
+            // 如果正在流式发送音频，继续发送
+            if (is_streaming_audio) {
+                // 每50ms发送一个音频块（类似qwen_demo.py）
+                TickType_t current_time = xTaskGetTickCount();
+                if (current_time - last_chunk_send_time >= pdMS_TO_TICKS(50)) {
+                    if (!send_audio_chunk()) {
+                        // 音频发送完成
+                        is_streaming_audio = false;
+                    }
+                }
+            }
+            
             // 响应音频的播放在WebSocket事件处理器中完成
-
             // 检查是否已经播放完成
             if (audio_manager->isResponsePlayed())
             {

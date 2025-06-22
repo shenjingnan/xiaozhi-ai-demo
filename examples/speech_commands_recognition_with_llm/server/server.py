@@ -87,28 +87,21 @@ class WebSocketAudioServer:
                 try:
                     # 检查消息类型
                     if isinstance(message, bytes):
-                        # 二进制音频数据
+                        # 二进制音频数据 - 开始流式处理
                         print(
-                            f"🎤 [{client_ip}] 接收到二进制音频数据: {len(message)} 字节"
+                            f"🎤 [{client_ip}] 接收到第一个音频块: {len(message)} 字节，开始流式处理..."
                         )
-
-                        # 保存音频
-                        current_timestamp = datetime.now()
-                        saved_file = await self.save_audio([message], current_timestamp)
-                        if saved_file:
-                            print(f"✅ [{client_ip}] 音频已保存: {saved_file}")
-
-                        # 等待一下再发送响应
-                        print(f"⏳ [{client_ip}] 等待0.5秒后发送响应音频...")
-                        await asyncio.sleep(0.5)
-
-                        # 发送响应音频
-                        if self.use_model:
-                            await self.send_model_response_audio(
-                                websocket, client_ip, message
-                            )
-                        else:
-                            await self.send_response_audio(websocket, client_ip)
+                        
+                        # 将第一个消息放回处理流程
+                        async def message_generator():
+                            yield message
+                            async for msg in websocket:
+                                yield msg
+                        
+                        # 处理流式音频
+                        await self.process_streaming_audio_with_first_message(
+                            websocket, client_ip, message
+                        )
                         continue
 
                     # 解析JSON消息
@@ -164,6 +157,221 @@ class WebSocketAudioServer:
         except Exception as e:
             print(f"❌ [{client_ip}] 连接错误: {e}")
 
+    async def process_streaming_audio_with_first_message(self, websocket, client_ip, first_message):
+        """处理流式音频数据（包括第一个消息）"""
+        print(f"🎤 [{client_ip}] 开始接收流式音频数据...")
+        
+        # 音频数据缓冲区
+        audio_buffer = bytearray()
+        audio_buffer.extend(first_message)
+        
+        # 创建一个任务来直接转发音频到LLM
+        realtime_client = None
+        send_task = None
+        
+        # 创建音频跟踪器
+        audio_tracker = {'total_sent': 0, 'last_time': time.time()}
+        
+        if self.use_model:
+            try:
+                # 创建大模型客户端
+                realtime_client = OmniRealtimeClient(
+                    base_url="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+                    api_key=self.api_key,
+                    model="qwen-omni-turbo-realtime-2025-05-08",
+                    voice="Chelsie",
+                    on_audio_delta=lambda audio: asyncio.create_task(self.on_audio_delta_handler(websocket, client_ip, audio, audio_tracker)),
+                    turn_detection_mode=TurnDetectionMode.MANUAL,
+                )
+                
+                # 连接到大模型
+                await realtime_client.connect()
+                
+                # 启动消息处理
+                message_task = asyncio.create_task(realtime_client.handle_messages())
+                
+                # 发送第一个音频块
+                encoded_data = base64.b64encode(first_message).decode("utf-8")
+                event = {
+                    "event_id": "event_" + str(int(time.time() * 1000)),
+                    "type": "input_audio_buffer.append",
+                    "audio": encoded_data,
+                }
+                await realtime_client.send_event(event)
+                
+            except Exception as e:
+                print(f"❌ [{client_ip}] 初始化大模型失败: {e}")
+                self.use_model = False
+        
+        # 继续接收音频数据
+        last_receive_time = time.time()
+        silence_duration = 0
+        
+        while True:
+            try:
+                # 接收数据（设置较短超时）
+                message = await asyncio.wait_for(websocket.recv(), timeout=0.5)
+                
+                if isinstance(message, bytes):
+                    # 二进制音频数据
+                    audio_buffer.extend(message)
+                    print(f"   收到音频块: {len(message)} 字节, 总计: {len(audio_buffer)} 字节")
+                    
+                    # 如果使用模型，直接转发到LLM
+                    if self.use_model and realtime_client:
+                        encoded_data = base64.b64encode(message).decode("utf-8")
+                        event = {
+                            "event_id": "event_" + str(int(time.time() * 1000)),
+                            "type": "input_audio_buffer.append",
+                            "audio": encoded_data,
+                        }
+                        await realtime_client.send_event(event)
+                    
+                    last_receive_time = time.time()
+                    silence_duration = 0
+                else:
+                    # 非二进制消息，可能是控制消息
+                    break
+                    
+            except asyncio.TimeoutError:
+                # 检查静音时长
+                current_time = time.time()
+                silence_duration = current_time - last_receive_time
+                
+                # 如果超过1秒没有新数据，认为录音结束
+                if silence_duration > 1.0:
+                    print(f"⏰ [{client_ip}] 检测到静音超过1秒，结束录音")
+                    break
+                    
+            except Exception as e:
+                print(f"❌ [{client_ip}] 接收音频数据失败: {e}")
+                break
+        
+        # 音频接收完成
+        if len(audio_buffer) > 0:
+            print(f"✅ [{client_ip}] 音频接收完成，总大小: {len(audio_buffer)} 字节 ({len(audio_buffer)/2/SAMPLE_RATE:.2f}秒)")
+            
+            # 保存音频
+            current_timestamp = datetime.now()
+            saved_file = await self.save_audio([bytes(audio_buffer)], current_timestamp)
+            if saved_file:
+                print(f"✅ [{client_ip}] 音频已保存: {saved_file}")
+            
+            # 如果使用模型，触发响应生成
+            if self.use_model and realtime_client:
+                try:
+                    # 手动触发响应生成
+                    await realtime_client.create_response()
+                    
+                    # 等待响应完成（最多30秒）
+                    print(f"🤖 [{client_ip}] 等待模型生成响应...")
+                    max_wait_time = 30  # 最多等待30秒
+                    start_time = time.time()
+                    
+                    while time.time() - start_time < max_wait_time:
+                        await asyncio.sleep(0.1)
+                        
+                        # 如果超过2秒没有新的音频数据发送，认为响应结束
+                        if audio_tracker['total_sent'] > 0 and time.time() - audio_tracker['last_time'] > 2.0:
+                            print(f"✅ [{client_ip}] 响应音频发送完成，总计: {audio_tracker['total_sent']} 字节")
+                            break
+                    
+                    # 如果没有收到任何音频响应，使用默认音频
+                    if audio_tracker['total_sent'] == 0:
+                        print(f"⚠️ [{client_ip}] 未收到大模型响应，使用默认音频")
+                        await self.send_response_audio_stream(websocket, client_ip)
+                    
+                    # 发送ping作为音频结束标志
+                    await websocket.ping()
+                    
+                    # 清理
+                    message_task.cancel()
+                    await realtime_client.close()
+                    
+                except Exception as e:
+                    print(f"❌ [{client_ip}] 模型处理失败: {e}")
+                    # 失败时使用默认音频
+                    await self.send_response_audio(websocket, client_ip)
+            else:
+                # 不使用模型，发送默认音频
+                await self.send_response_audio(websocket, client_ip)
+        else:
+            print(f"⚠️ [{client_ip}] 没有接收到音频数据")
+    
+    async def on_audio_delta_handler(self, websocket, client_ip, audio_data, audio_tracker):
+        """处理模型返回的音频片段"""
+        try:
+            # 直接重采样并发送音频数据
+            resampled = self.resample_audio(
+                audio_data, MODEL_SAMPLE_RATE, SAMPLE_RATE
+            )
+            
+            # 立即发送到ESP32
+            await websocket.send(resampled)
+            print(f"   → 流式发送音频块: {len(resampled)} 字节")
+            
+            # 更新音频跟踪信息
+            audio_tracker['total_sent'] += len(resampled)
+            audio_tracker['last_time'] = time.time()
+            
+        except Exception as e:
+            print(f"❌ [{client_ip}] 发送音频块失败: {e}")
+    
+    async def process_streaming_audio(self, websocket, client_ip):
+        """处理流式音频数据"""
+        print(f"🎤 [{client_ip}] 开始接收流式音频数据...")
+        
+        # 音频数据缓冲区
+        audio_buffer = bytearray()
+        
+        # 等待音频数据
+        while True:
+            try:
+                # 接收数据（设置超时）
+                message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
+                
+                if isinstance(message, bytes):
+                    # 二进制音频数据
+                    audio_buffer.extend(message)
+                    print(f"   收到音频块: {len(message)} 字节, 总计: {len(audio_buffer)} 字节")
+                    
+                    # 检查是否已经收到足够的数据（例如超过1秒）
+                    if len(audio_buffer) >= SAMPLE_RATE * 2:  # 1秒的音频数据
+                        # 可以开始处理了
+                        break
+                else:
+                    # 非二进制消息，可能是控制消息
+                    break
+                    
+            except asyncio.TimeoutError:
+                # 超时，认为音频接收完成
+                print(f"⏰ [{client_ip}] 音频接收超时，准备处理")
+                break
+            except Exception as e:
+                print(f"❌ [{client_ip}] 接收音频数据失败: {e}")
+                break
+        
+        if len(audio_buffer) > 0:
+            print(f"✅ [{client_ip}] 音频接收完成，总大小: {len(audio_buffer)} 字节 ({len(audio_buffer)/2/SAMPLE_RATE:.2f}秒)")
+            
+            # 保存音频
+            current_timestamp = datetime.now()
+            saved_file = await self.save_audio([bytes(audio_buffer)], current_timestamp)
+            if saved_file:
+                print(f"✅ [{client_ip}] 音频已保存: {saved_file}")
+            
+            # 等待一下再发送响应
+            print(f"⏳ [{client_ip}] 等待0.5秒后发送响应音频...")
+            await asyncio.sleep(0.5)
+            
+            # 发送响应音频
+            if self.use_model:
+                await self.send_model_response_audio(websocket, client_ip, bytes(audio_buffer))
+            else:
+                await self.send_response_audio(websocket, client_ip)
+        else:
+            print(f"⚠️ [{client_ip}] 没有接收到音频数据")
+    
     async def send_model_response_audio(self, websocket, client_ip, user_audio_data):
         """使用大模型生成并发送响应音频（流式）"""
         print(f"🤖 [{client_ip}] 使用大模型生成响应音频（流式）...")
