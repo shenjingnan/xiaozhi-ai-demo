@@ -47,10 +47,9 @@ extern "C"
 #include "model_path.h"             // 模型路径定义
 #include "bsp_board.h"              // 板级支持包，INMP441麦克风驱动
 #include "esp_log.h"                // ESP日志系统
-#include "mock_voices/welcome.h"    // 欢迎音频数据文件
-#include "mock_voices/light_on.h"   // 开灯音频数据文件
-#include "mock_voices/light_off.h"  // 关灯音频数据文件
-#include "mock_voices/byebye.h"     // 再见音频数据文件
+#include "mock_voices/hi.h"         // 欢迎音频数据文件
+#include "mock_voices/ok.h"         // 确认音频数据文件
+#include "mock_voices/bye.h"     // 再见音频数据文件
 #include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
 #include "driver/uart.h"            // UART驱动
@@ -703,7 +702,7 @@ static void execute_exit_logic(void)
 {
     // 播放再见音频
     ESP_LOGI(TAG, "播放再见音频...");
-    play_audio_with_stop(byebye, byebye_len, "再见音频");
+    play_audio_with_stop(bye, bye_len, "再见音频");
 
     // 断开WebSocket连接
     websocket_disconnect();
@@ -1003,7 +1002,7 @@ extern "C" void app_main(void)
 
                 // 播放欢迎音频
                 ESP_LOGI(TAG, "播放欢迎音频...");
-                play_audio_with_stop(welcome, welcome_len, "欢迎音频");
+                play_audio_with_stop(hi, hi_len, "欢迎音频");
 
                 // 切换到录音状态
                 current_state = STATE_RECORDING;
@@ -1056,7 +1055,7 @@ extern "C" void app_main(void)
                             {
                                 ESP_LOGI(TAG, "💡 执行开灯命令");
                                 led_turn_on();
-                                play_audio_with_stop(light_on, light_on_len, "开灯确认音频");
+                                play_audio_with_stop(ok, ok_len, "开灯确认音频");
                                 // 继续保持连续对话模式
                                 is_recording = true;
                                 recording_length = 0;
@@ -1073,7 +1072,7 @@ extern "C" void app_main(void)
                             {
                                 ESP_LOGI(TAG, "💡 执行关灯命令");
                                 led_turn_off();
-                                play_audio_with_stop(light_off, light_off_len, "关灯确认音频");
+                                play_audio_with_stop(ok, ok_len, "关灯确认音频");
                                 // 继续保持连续对话模式
                                 is_recording = true;
                                 recording_length = 0;
@@ -1258,7 +1257,7 @@ extern "C" void app_main(void)
                         led_turn_on();
 
                         // 播放开灯确认音频
-                        play_audio_with_stop(light_on, light_on_len, "开灯确认音频");
+                        play_audio_with_stop(ok, ok_len, "开灯确认音频");
                     }
                     else if (command_id == COMMAND_TURN_OFF_LIGHT)
                     {
@@ -1266,7 +1265,7 @@ extern "C" void app_main(void)
                         led_turn_off();
 
                         // 播放关灯确认音频
-                        play_audio_with_stop(light_off, light_off_len, "关灯确认音频");
+                        play_audio_with_stop(ok, ok_len, "关灯确认音频");
                     }
                     else if (command_id == COMMAND_CUSTOM)
                     {
