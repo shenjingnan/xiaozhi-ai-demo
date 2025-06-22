@@ -81,6 +81,17 @@ esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_
 esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len);
 
 /**
+ * @brief Play audio data for streaming (does not stop I2S after playback)
+ *
+ * @param audio_data Pointer to audio data buffer
+ * @param data_len Length of audio data in bytes
+ * @return
+ *    - ESP_OK: Success
+ *    - Others: Fail
+ */
+esp_err_t bsp_play_audio_stream(const uint8_t *audio_data, size_t data_len);
+
+/**
  * @brief Stop I2S audio output to prevent noise
  *
  * @return

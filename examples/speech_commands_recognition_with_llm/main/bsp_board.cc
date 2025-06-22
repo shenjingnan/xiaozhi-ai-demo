@@ -380,13 +380,10 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
         ESP_LOGD(TAG, "I2S 发送通道已重新启用");
         
         // 发送一小段静音数据来初始化通道
-        const size_t init_silence_size = 1024; // 1KB的静音数据
-        uint8_t *init_silence = (uint8_t *)calloc(init_silence_size, 1);
-        if (init_silence) {
-            size_t bytes_written = 0;
-            i2s_channel_write(tx_handle, init_silence, init_silence_size, &bytes_written, pdMS_TO_TICKS(10));
-            free(init_silence);
-        }
+        const size_t init_silence_size = 256; // 减小到256字节，避免大量内存分配
+        static uint8_t init_silence[256] = {0}; // 使用静态数组，避免动态分配
+        size_t silence_written = 0;
+        i2s_channel_write(tx_handle, init_silence, init_silence_size, &silence_written, pdMS_TO_TICKS(10));
     }
 
     // 循环写入音频数据，确保所有数据都被发送
@@ -427,6 +424,93 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
     }
 
     ESP_LOGI(TAG, "音频播放完成，播放了 %zu 字节", total_written);
+    return ESP_OK;
+}
+
+/**
+ * @brief 通过 I2S 播放音频数据（流式版本，不停止I2S）
+ *
+ * 这个函数与 bsp_play_audio 类似，但不会在播放完成后停止I2S，
+ * 适用于连续播放多个音频块的流式场景。
+ *
+ * @param audio_data 指向音频数据的指针
+ * @param data_len 音频数据长度（字节）
+ * @return esp_err_t 播放结果
+ */
+esp_err_t bsp_play_audio_stream(const uint8_t *audio_data, size_t data_len)
+{
+    esp_err_t ret = ESP_OK;
+    size_t bytes_written = 0;
+    size_t total_written = 0;
+
+    if (tx_handle == nullptr)
+    {
+        ESP_LOGE(TAG, "I2S 发送通道未初始化");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (audio_data == nullptr || data_len == 0)
+    {
+        ESP_LOGE(TAG, "无效的音频数据");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 确保 I2S 发送通道已启用（如果之前被停止了）
+    if (!tx_channel_enabled)
+    {
+        // 先启用功放
+        gpio_set_level(I2S_OUT_SD_PIN, 1); // 高电平启用功放
+        vTaskDelay(pdMS_TO_TICKS(10)); // 等待功放启动
+        ESP_LOGD(TAG, "MAX98357A功放已启用");
+        
+        ret = i2s_channel_enable(tx_handle);
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "启用 I2S 发送通道失败: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        tx_channel_enabled = true;
+        ESP_LOGD(TAG, "I2S 发送通道已重新启用");
+        
+        // 发送一小段静音数据来初始化通道
+        const size_t init_silence_size = 256; // 减小到256字节，避免大量内存分配
+        static uint8_t init_silence[256] = {0}; // 使用静态数组，避免动态分配
+        size_t silence_written = 0;
+        i2s_channel_write(tx_handle, init_silence, init_silence_size, &silence_written, pdMS_TO_TICKS(10));
+    }
+
+    // 循环写入音频数据，确保所有数据都被发送
+    while (total_written < data_len)
+    {
+        size_t bytes_to_write = data_len - total_written;
+        
+        // 将音频数据写入 I2S 发送通道
+        ret = i2s_channel_write(tx_handle, audio_data + total_written, bytes_to_write, &bytes_written, portMAX_DELAY);
+
+        if (ret != ESP_OK)
+        {
+            ESP_LOGE(TAG, "写入 I2S 音频数据失败: %s", esp_err_to_name(ret));
+            break;
+        }
+
+        total_written += bytes_written;
+
+        // 显示播放进度（每10KB显示一次）
+        if ((total_written % 10240) < bytes_written)
+        {
+            ESP_LOGD(TAG, "音频播放进度: %zu/%zu 字节 (%.1f%%)", 
+                     total_written, data_len, (float)total_written * 100.0f / data_len);
+        }
+    }
+
+    if (total_written != data_len)
+    {
+        ESP_LOGW(TAG, "音频数据写入不完整: 预期 %zu 字节，实际写入 %zu 字节", data_len, total_written);
+        return ESP_FAIL;
+    }
+
+    // 注意：这里不调用 bsp_audio_stop()，保持I2S继续运行
+    ESP_LOGD(TAG, "流式音频块播放完成，播放了 %zu 字节", total_written);
     return ESP_OK;
 }
 

@@ -203,16 +203,48 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
 
         // 使用AudioManager处理WebSocket音频数据
         if (audio_manager != nullptr) {
-            bool audio_complete = audio_manager->processWebSocketData(
-                data->op_code, 
-                (const uint8_t*)data->data_ptr, 
-                data->data_len,
-                current_state == STATE_WAITING_RESPONSE
-            );
-            
-            // 如果音频处理完成，更新响应播放标志
-            if (audio_complete && current_state == STATE_WAITING_RESPONSE) {
-                // 音频已在processWebSocketData中播放
+            // 检查是否是二进制音频数据
+            if (data->op_code == 0x02 && data->data_len > 0 && current_state == STATE_WAITING_RESPONSE) {
+                // 如果还没开始流式播放，初始化
+                if (!audio_manager->isStreamingActive()) {
+                    ESP_LOGI(TAG, "🎵 开始流式音频播放");
+                    audio_manager->startStreamingPlayback();
+                }
+                
+                // 添加音频数据到流式播放队列
+                bool added = audio_manager->addStreamingAudioChunk(
+                    (const uint8_t*)data->data_ptr, 
+                    data->data_len
+                );
+                
+                if (added) {
+                    ESP_LOGD(TAG, "添加流式音频块: %d 字节", data->data_len);
+                } else {
+                    ESP_LOGW(TAG, "流式音频缓冲区满");
+                }
+            }
+            // 检测ping包作为流结束标志
+            else if (data->op_code == 0x09 && audio_manager->isStreamingActive()) {
+                ESP_LOGI(TAG, "收到ping包，结束流式播放");
+                audio_manager->finishStreamingPlayback();
+                // 标记响应已播放
+                if (current_state == STATE_WAITING_RESPONSE) {
+                    audio_manager->setStreamingComplete();
+                }
+            }
+            else {
+                // 对于非流式场景，使用原有的处理方式
+                bool audio_complete = audio_manager->processWebSocketData(
+                    data->op_code, 
+                    (const uint8_t*)data->data_ptr, 
+                    data->data_len,
+                    current_state == STATE_WAITING_RESPONSE
+                );
+                
+                // 如果音频处理完成，更新响应播放标志
+                if (audio_complete && current_state == STATE_WAITING_RESPONSE) {
+                    // 音频已在processWebSocketData中播放
+                }
             }
         }
         
@@ -312,6 +344,7 @@ static void websocket_connect(void)
     esp_websocket_client_config_t ws_cfg = {};
     ws_cfg.uri = WS_URI;
     ws_cfg.buffer_size = 8192;
+    ws_cfg.task_stack = 8192;  // 增加任务栈大小从默认的5120到8192
 
     ws_client = esp_websocket_client_init(&ws_cfg);
     esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, NULL);

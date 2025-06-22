@@ -124,6 +124,39 @@ public:
      * @return esp_err_t 播放结果
      */
     esp_err_t finishResponseAndPlay();
+    
+    // ========== 流式音频播放接口 ==========
+    
+    /**
+     * @brief 开始流式音频播放
+     */
+    void startStreamingPlayback();
+    
+    /**
+     * @brief 添加音频数据块到流式播放队列
+     * 
+     * @param data 音频数据
+     * @param size 数据大小（字节）
+     * @return true 成功，false 失败
+     */
+    bool addStreamingAudioChunk(const uint8_t* data, size_t size);
+    
+    /**
+     * @brief 结束流式音频播放
+     */
+    void finishStreamingPlayback();
+    
+    /**
+     * @brief 检查流式播放是否正在进行
+     * 
+     * @return true 正在播放，false 未在播放
+     */
+    bool isStreamingActive() const { return is_streaming; }
+    
+    /**
+     * @brief 标记流式播放已完成
+     */
+    void setStreamingComplete() { response_played = true; }
 
     /**
      * @brief 播放指定的音频数据
@@ -208,6 +241,15 @@ private:
     bool receiving_audio;
     TickType_t last_audio_time;
     static const size_t MAX_WS_AUDIO_SIZE = 1024 * 1024; // 1MB
+    
+    // 流式播放相关
+    bool is_streaming;
+    uint8_t* streaming_buffer;
+    size_t streaming_buffer_size;
+    size_t streaming_write_pos;
+    size_t streaming_read_pos;
+    static const size_t STREAMING_BUFFER_SIZE = 32768; // 32KB环形缓冲区
+    static const size_t STREAMING_CHUNK_SIZE = 3200;   // 每次播放的块大小
 
     // 日志标签
     static const char* TAG;
