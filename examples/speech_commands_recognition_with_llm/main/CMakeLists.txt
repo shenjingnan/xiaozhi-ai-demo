@@ -13,6 +13,8 @@ idf_component_register(SRCS
                        main.cc
                        bsp_board.cc
                        audio_manager.cc
+                       wifi_manager.cc
+                       websocket_client.cc
                        INCLUDE_DIRS
                        "."
                        REQUIRES ${requires}

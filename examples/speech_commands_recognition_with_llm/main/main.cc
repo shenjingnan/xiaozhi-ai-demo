@@ -55,14 +55,12 @@ extern "C"
 #include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
 #include "driver/uart.h"            // UART驱动
-#include "esp_wifi.h"               // WiFi驱动
-#include "esp_event.h"              // 事件循环
 #include "nvs_flash.h"              // NVS存储
-#include "esp_netif.h"              // 网络接口
-#include "esp_websocket_client.h"   // WebSocket客户端
 }
 
 #include "audio_manager.h"          // 音频管理器
+#include "wifi_manager.h"           // WiFi管理器
+#include "websocket_client.h"        // WebSocket客户端
 
 static const char *TAG = "语音识别"; // 日志标签
 
@@ -72,21 +70,13 @@ static const char *TAG = "语音识别"; // 日志标签
 // WiFi配置
 #define WIFI_SSID "1804"
 #define WIFI_PASS "Sjn123123@"
-#define WIFI_MAXIMUM_RETRY 5
 
 // WebSocket配置
 #define WS_URI "ws://192.168.1.175:8888" // 需要替换为实际的服务器IP
 
-// WiFi事件组
-static EventGroupHandle_t s_wifi_event_group;
-#define WIFI_CONNECTED_BIT BIT0
-#define WIFI_FAIL_BIT BIT1
-
-// WebSocket客户端句柄
-static esp_websocket_client_handle_t ws_client = NULL;
-static bool ws_is_connected = false;  // WebSocket连接状态
-static TaskHandle_t ws_reconnect_task_handle = NULL;  // 重连任务句柄
-static const int WS_RECONNECT_DELAY_MS = 5000;  // 重连延迟5秒
+// WiFi和WebSocket管理器
+static WiFiManager* wifi_manager = nullptr;
+static WebSocketClient* websocket_client = nullptr;
 
 // 系统状态定义
 typedef enum
@@ -152,257 +142,77 @@ static TickType_t recording_timeout_start = 0;  // 录音超时计时开始时�
 #define RECORDING_TIMEOUT_MS 10000  // 录音超时时间（10秒）
 static bool user_started_speaking = false;  // 标记用户是否已经开始说话
 
-// WiFi重试计数
-static int s_retry_num = 0;
-
-
 /**
- * @brief WiFi事件处理器
+ * @brief WebSocket事件处理回调
  */
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data)
+static void on_websocket_event(const WebSocketClient::EventData& event)
 {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    switch (event.type)
     {
-        esp_wifi_connect();
-    }
-    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
-    {
-        if (s_retry_num < WIFI_MAXIMUM_RETRY)
-        {
-            esp_wifi_connect();
-            s_retry_num++;
-            ESP_LOGI(TAG, "重试连接WiFi... (%d/%d)", s_retry_num, WIFI_MAXIMUM_RETRY);
-        }
-        else
-        {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
-        }
-        ESP_LOGI(TAG, "WiFi连接失败");
-    }
-    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
-    {
-        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
-        ESP_LOGI(TAG, "获得IP地址:" IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
-    }
-}
-
-/**
- * @brief WebSocket事件处理器
- */
-static void websocket_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
-{
-    esp_websocket_event_data_t *data = (esp_websocket_event_data_t *)event_data;
-
-    switch (event_id)
-    {
-    case WEBSOCKET_EVENT_CONNECTED:
+    case WebSocketClient::EventType::CONNECTED:
         ESP_LOGI(TAG, "🔗 WebSocket已连接");
-        ws_is_connected = true;
         break;
 
-    case WEBSOCKET_EVENT_DISCONNECTED:
+    case WebSocketClient::EventType::DISCONNECTED:
         ESP_LOGI(TAG, "🔌 WebSocket已断开");
-        ws_is_connected = false;
         break;
 
-    case WEBSOCKET_EVENT_DATA:
+    case WebSocketClient::EventType::DATA_BINARY:
     {
-        ESP_LOGI(TAG, "收到WebSocket数据，长度: %d 字节, op_code: 0x%02x", data->data_len, data->op_code);
+        ESP_LOGI(TAG, "收到WebSocket二进制数据，长度: %zu 字节", event.data_len);
 
         // 使用AudioManager处理WebSocket音频数据
-        if (audio_manager != nullptr) {
-            // 检查是否是二进制音频数据
-            if (data->op_code == 0x02 && data->data_len > 0 && current_state == STATE_WAITING_RESPONSE) {
-                // 如果还没开始流式播放，初始化
-                if (!audio_manager->isStreamingActive()) {
-                    ESP_LOGI(TAG, "🎵 开始流式音频播放");
-                    audio_manager->startStreamingPlayback();
-                }
-                
-                // 添加音频数据到流式播放队列
-                bool added = audio_manager->addStreamingAudioChunk(
-                    (const uint8_t*)data->data_ptr, 
-                    data->data_len
-                );
-                
-                if (added) {
-                    ESP_LOGD(TAG, "添加流式音频块: %d 字节", data->data_len);
-                } else {
-                    ESP_LOGW(TAG, "流式音频缓冲区满");
-                }
+        if (audio_manager != nullptr && event.data_len > 0 && current_state == STATE_WAITING_RESPONSE) {
+            // 如果还没开始流式播放，初始化
+            if (!audio_manager->isStreamingActive()) {
+                ESP_LOGI(TAG, "🎵 开始流式音频播放");
+                audio_manager->startStreamingPlayback();
             }
-            // 检测ping包作为流结束标志
-            else if (data->op_code == 0x09 && audio_manager->isStreamingActive()) {
-                ESP_LOGI(TAG, "收到ping包，结束流式播放");
-                audio_manager->finishStreamingPlayback();
-                // 标记响应已播放
-                if (current_state == STATE_WAITING_RESPONSE) {
-                    audio_manager->setStreamingComplete();
-                }
-            }
-            else {
-                // 对于非流式场景，使用原有的处理方式
-                bool audio_complete = audio_manager->processWebSocketData(
-                    data->op_code, 
-                    (const uint8_t*)data->data_ptr, 
-                    data->data_len,
-                    current_state == STATE_WAITING_RESPONSE
-                );
-                
-                // 如果音频处理完成，更新响应播放标志
-                if (audio_complete && current_state == STATE_WAITING_RESPONSE) {
-                    // 音频已在processWebSocketData中播放
-                }
-            }
-        }
-        
-        // JSON数据处理（用于其他事件）
-        if (data->data_ptr && data->data_len > 0 && data->data_ptr[0] == '{') {
-            // 创建临时缓冲区
-            char *json_str = (char *)malloc(data->data_len + 1);
-            if (json_str) {
-                memcpy(json_str, data->data_ptr, data->data_len);
-                json_str[data->data_len] = '\0';
-                ESP_LOGI(TAG, "收到JSON消息: %s", json_str);
-                free(json_str);
+            
+            // 添加音频数据到流式播放队列
+            bool added = audio_manager->addStreamingAudioChunk(event.data, event.data_len);
+            
+            if (added) {
+                ESP_LOGD(TAG, "添加流式音频块: %zu 字节", event.data_len);
+            } else {
+                ESP_LOGW(TAG, "流式音频缓冲区满");
             }
         }
     }
     break;
-
-    case WEBSOCKET_EVENT_ERROR:
-        ESP_LOGI(TAG, "❌ WebSocket错误");
-        ws_is_connected = false;
-        break;
-    }
-}
-
-/**
- * @brief 初始化WiFi连接
- */
-static void wifi_init_sta(void)
-{
-    s_wifi_event_group = xEventGroupCreate();
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    esp_netif_create_default_wifi_sta();
-
-    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    esp_event_handler_instance_t instance_any_id;
-    esp_event_handler_instance_t instance_got_ip;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_any_id));
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &instance_got_ip));
-
-    wifi_config_t wifi_config = {};
-    strcpy((char *)wifi_config.sta.ssid, WIFI_SSID);
-    strcpy((char *)wifi_config.sta.password, WIFI_PASS);
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    wifi_config.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
-
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "WiFi初始化完成");
-
-    // 等待连接或失败
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_FAIL_BIT,
-                                           pdFALSE,
-                                           pdFALSE,
-                                           portMAX_DELAY);
-
-    if (bits & WIFI_CONNECTED_BIT)
-    {
-        ESP_LOGI(TAG, "✅ WiFi连接成功: %s", WIFI_SSID);
-    }
-    else if (bits & WIFI_FAIL_BIT)
-    {
-        ESP_LOGI(TAG, "❌ WiFi连接失败: %s", WIFI_SSID);
-    }
-    else
-    {
-        ESP_LOGE(TAG, "意外事件");
-    }
-}
-
-/**
- * @brief WebSocket重连任务
- */
-static void websocket_reconnect_task(void *arg)
-{
-    while (1)
-    {
-        if (!ws_is_connected && ws_client != NULL)
-        {
-            ESP_LOGI(TAG, "尝试重新连接WebSocket...");
-            esp_websocket_client_stop(ws_client);
-            vTaskDelay(pdMS_TO_TICKS(100));
-            esp_websocket_client_start(ws_client);
+    
+    case WebSocketClient::EventType::PING:
+        // 检测ping包作为流结束标志
+        if (audio_manager != nullptr && audio_manager->isStreamingActive()) {
+            ESP_LOGI(TAG, "收到ping包，结束流式播放");
+            audio_manager->finishStreamingPlayback();
+            // 标记响应已播放
+            if (current_state == STATE_WAITING_RESPONSE) {
+                audio_manager->setStreamingComplete();
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(WS_RECONNECT_DELAY_MS));
-    }
-}
+        break;
 
-/**
- * @brief 连接WebSocket服务器
- */
-static void websocket_connect(void)
-{
-    if (ws_client != NULL)
-    {
-        ESP_LOGW(TAG, "WebSocket客户端已存在");
-        return;
-    }
+    case WebSocketClient::EventType::DATA_TEXT:
+        // JSON数据处理（用于其他事件）
+        if (event.data && event.data_len > 0) {
+            // 创建临时缓冲区
+            char *json_str = (char *)malloc(event.data_len + 1);
+            if (json_str) {
+                memcpy(json_str, event.data, event.data_len);
+                json_str[event.data_len] = '\0';
+                ESP_LOGI(TAG, "收到JSON消息: %s", json_str);
+                free(json_str);
+            }
+        }
+        break;
 
-    ESP_LOGI(TAG, "正在连接WebSocket服务器: %s", WS_URI);
-
-    esp_websocket_client_config_t ws_cfg = {};
-    ws_cfg.uri = WS_URI;
-    ws_cfg.buffer_size = 8192;
-    ws_cfg.task_stack = 8192;  // 增加任务栈大小从默认的5120到8192
-    ws_cfg.reconnect_timeout_ms = 10000;  // 10秒重连超时
-    ws_cfg.network_timeout_ms = 10000;     // 10秒网络超时
-
-    ws_client = esp_websocket_client_init(&ws_cfg);
-    esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, NULL);
-    esp_websocket_client_start(ws_client);
-
-    // 创建重连任务（如果还未创建）
-    if (ws_reconnect_task_handle == NULL)
-    {
-        xTaskCreate(websocket_reconnect_task, "ws_reconnect", 4096, NULL, 5, &ws_reconnect_task_handle);
-        ESP_LOGI(TAG, "WebSocket重连任务已创建");
-    }
-}
-
-/**
- * @brief 断开WebSocket连接
- */
-static void websocket_disconnect(void)
-{
-    // 注意：现在我们不再销毁WebSocket客户端，只是停止它
-    // 这样可以保持连接配置，便于后续重连
-    if (ws_client != NULL)
-    {
-        ESP_LOGI(TAG, "正在停止WebSocket连接...");
-        esp_websocket_client_stop(ws_client);
-        ws_is_connected = false;
-        ESP_LOGI(TAG, "✅ WebSocket已停止");
+    case WebSocketClient::EventType::ERROR:
+        ESP_LOGI(TAG, "❌ WebSocket错误");
+        break;
+        
+    default:
+        break;
     }
 }
 
@@ -448,11 +258,8 @@ static void led_turn_off(void)
     ESP_LOGI(TAG, "外接LED熄灭");
 }
 
-// 全局变量：记录已发送的音频位置
-static size_t audio_sent_position = 0;
-static bool is_streaming_audio = false;
-static TickType_t last_chunk_send_time = 0;
-static bool is_realtime_streaming = false;  // 实时流式传输标志
+// 实时流式传输标志
+static bool is_realtime_streaming = false;
 
 /**
  * @brief 配置自定义命令词
@@ -587,7 +394,9 @@ static void execute_exit_logic(void)
     play_audio_with_stop(bye, bye_len, "再见音频");
 
     // 断开WebSocket连接
-    websocket_disconnect();
+    if (websocket_client != nullptr) {
+        websocket_client->disconnect();
+    }
 
     // 重置所有状态
     current_state = STATE_WAITING_WAKEUP;
@@ -626,12 +435,24 @@ extern "C" void app_main(void)
 
     // ========== 第三步：初始化WiFi ==========
     ESP_LOGI(TAG, "正在连接WiFi...");
-    wifi_init_sta();
+    wifi_manager = new WiFiManager(WIFI_SSID, WIFI_PASS);
+    if (wifi_manager->connect() != ESP_OK) {
+        ESP_LOGE(TAG, "WiFi连接失败");
+        delete wifi_manager;
+        return;
+    }
     
     // ========== 第四步：初始化WebSocket连接 ==========
     // 在WiFi连接成功后立即连接WebSocket
     ESP_LOGI(TAG, "正在初始化WebSocket连接...");
-    websocket_connect();
+    websocket_client = new WebSocketClient(WS_URI, true, 5000);
+    websocket_client->setEventCallback(on_websocket_event);
+    if (websocket_client->connect() != ESP_OK) {
+        ESP_LOGE(TAG, "WebSocket连接失败");
+        delete websocket_client;
+        delete wifi_manager;
+        return;
+    }
 
     // ========== 第四步：初始化INMP441麦克风硬件 ==========
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
@@ -918,22 +739,22 @@ extern "C" void app_main(void)
                 printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
 
                 // WebSocket应该已经连接，如果没有连接则尝试重新启动
-                if (!ws_is_connected && ws_client != NULL)
+                if (websocket_client != nullptr && !websocket_client->isConnected())
                 {
-                    ESP_LOGI(TAG, "WebSocket未连接，尝试重新启动...");
-                    esp_websocket_client_start(ws_client);
+                    ESP_LOGI(TAG, "WebSocket未连接，尝试重新连接...");
+                    websocket_client->connect();
                     vTaskDelay(pdMS_TO_TICKS(500));  // 等待连接
                 }
 
                 // 通过WebSocket发送唤醒词检测事件
-                if (ws_is_connected && ws_client != NULL)
+                if (websocket_client != nullptr && websocket_client->isConnected())
                 {
                     char wake_msg[256];
                     snprintf(wake_msg, sizeof(wake_msg),
                              "{\"event\":\"wake_word_detected\",\"model\":\"%s\",\"timestamp\":%lld}",
                              model_name,
                              (long long)esp_timer_get_time() / 1000);
-                    esp_websocket_client_send_text(ws_client, wake_msg, strlen(wake_msg), portMAX_DELAY);
+                    websocket_client->sendText(wake_msg);
                 }
 
                 // 播放欢迎音频
@@ -941,10 +762,10 @@ extern "C" void app_main(void)
                 play_audio_with_stop(hi, hi_len, "欢迎音频");
 
                 // 发送开始录音事件
-                if (ws_is_connected && ws_client != NULL)
+                if (websocket_client != nullptr && websocket_client->isConnected())
                 {
                     const char* start_msg = "{\"event\":\"recording_started\"}";
-                    esp_websocket_client_send_text(ws_client, start_msg, strlen(start_msg), portMAX_DELAY);
+                    websocket_client->sendText(start_msg);
                     ESP_LOGI(TAG, "发送录音开始事件");
                 }
 
@@ -974,11 +795,11 @@ extern "C" void app_main(void)
                 audio_manager->addRecordingData(processed_audio, samples);
                 
                 // 实时流式发送音频数据到服务器
-                if (is_realtime_streaming && ws_is_connected && ws_client != NULL)
+                if (is_realtime_streaming && websocket_client != nullptr && websocket_client->isConnected())
                 {
                     // 直接发送当前音频块
                     size_t bytes_to_send = samples * sizeof(int16_t);
-                    esp_websocket_client_send_bin(ws_client, (const char*)processed_audio, bytes_to_send, portMAX_DELAY);
+                    websocket_client->sendBinary((const uint8_t*)processed_audio, bytes_to_send);
                     ESP_LOGD(TAG, "实时发送音频块: %zu 字节", bytes_to_send);
                 }
                 
@@ -1109,10 +930,10 @@ extern "C" void app_main(void)
                         if (user_started_speaking && rec_len > SAMPLE_RATE / 4) // 至少0.25秒的音频
                         {
                             // 发送录音结束事件
-                            if (ws_is_connected && ws_client != NULL)
+                            if (websocket_client != nullptr && websocket_client->isConnected())
                             {
                                 const char* end_msg = "{\"event\":\"recording_ended\"}";
-                                esp_websocket_client_send_text(ws_client, end_msg, strlen(end_msg), portMAX_DELAY);
+                                websocket_client->sendText(end_msg);
                                 ESP_LOGI(TAG, "发送录音结束事件");
                             }
                             
@@ -1125,10 +946,10 @@ extern "C" void app_main(void)
                         {
                             ESP_LOGI(TAG, "录音时间过短或用户未说话，重新开始录音");
                             // 发送录音取消事件
-                            if (ws_is_connected && ws_client != NULL)
+                            if (websocket_client != nullptr && websocket_client->isConnected())
                             {
                                 const char* cancel_msg = "{\"event\":\"recording_cancelled\"}";
-                                esp_websocket_client_send_text(ws_client, cancel_msg, strlen(cancel_msg), portMAX_DELAY);
+                                websocket_client->sendText(cancel_msg);
                             }
                             // 重新开始录音
                             audio_manager->clearRecordingBuffer();
@@ -1155,10 +976,10 @@ extern "C" void app_main(void)
                 is_realtime_streaming = false;  // 停止实时流式传输
 
                 // 发送录音结束事件
-                if (ws_is_connected && ws_client != NULL)
+                if (websocket_client != nullptr && websocket_client->isConnected())
                 {
                     const char* end_msg = "{\"event\":\"recording_ended\"}";
-                    esp_websocket_client_send_text(ws_client, end_msg, strlen(end_msg), portMAX_DELAY);
+                    websocket_client->sendText(end_msg);
                     ESP_LOGI(TAG, "发送录音结束事件（缓冲区满）");
                 }
 
@@ -1201,10 +1022,10 @@ extern "C" void app_main(void)
             {
                 // 响应已播放完成，重新进入录音状态（连续对话）
                 // 发送开始录音事件
-                if (ws_is_connected && ws_client != NULL)
+                if (websocket_client != nullptr && websocket_client->isConnected())
                 {
                     const char* start_msg = "{\"event\":\"recording_started\"}";
-                    esp_websocket_client_send_text(ws_client, start_msg, strlen(start_msg), portMAX_DELAY);
+                    websocket_client->sendText(start_msg);
                 }
                 
                 current_state = STATE_RECORDING;
@@ -1335,19 +1156,18 @@ extern "C" void app_main(void)
         free(buffer);
     }
 
-    // 停止WebSocket重连任务
-    if (ws_reconnect_task_handle != NULL)
+    // 清理WebSocket客户端
+    if (websocket_client != nullptr)
     {
-        vTaskDelete(ws_reconnect_task_handle);
-        ws_reconnect_task_handle = NULL;
+        delete websocket_client;
+        websocket_client = nullptr;
     }
 
-    // 清理WebSocket客户端
-    if (ws_client != NULL)
+    // 清理WiFi管理器
+    if (wifi_manager != nullptr)
     {
-        esp_websocket_client_stop(ws_client);
-        esp_websocket_client_destroy(ws_client);
-        ws_client = NULL;
+        delete wifi_manager;
+        wifi_manager = nullptr;
     }
 
     // 释放音频管理器
