@@ -1036,7 +1036,7 @@ extern "C" void app_main(void)
                 is_continuous_conversation = false;  // 第一次录音，不是连续对话
                 user_started_speaking = false;
                 recording_timeout_start = 0;  // 第一次录音不需要超时
-                is_realtime_streaming = true;  // 开启实时流式传输
+                is_realtime_streaming = false;  // 等待用户开始说话才开启流式传输
                 // 重置VAD触发器状态
                 vad_reset_trigger(vad_inst);
                 // 重置命令词识别缓冲区
@@ -1095,7 +1095,7 @@ extern "C" void app_main(void)
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
                                 recording_timeout_start = xTaskGetTickCount();
-                                is_realtime_streaming = true;  // 重新开启实时流式传输
+                                is_realtime_streaming = false;  // 等待用户开始说话才开启流式传输
                                 vad_reset_trigger(vad_inst);
                                 multinet->clean(mn_model_data);
                                 ESP_LOGI(TAG, "命令执行完成，继续录音...");
@@ -1113,7 +1113,7 @@ extern "C" void app_main(void)
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
                                 recording_timeout_start = xTaskGetTickCount();
-                                is_realtime_streaming = true;  // 重新开启实时流式传输
+                                is_realtime_streaming = false;  // 等待用户开始说话才开启流式传输
                                 vad_reset_trigger(vad_inst);
                                 multinet->clean(mn_model_data);
                                 ESP_LOGI(TAG, "命令执行完成，继续录音...");
@@ -1136,7 +1136,7 @@ extern "C" void app_main(void)
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
                                 recording_timeout_start = xTaskGetTickCount();
-                                is_realtime_streaming = true;  // 重新开启实时流式传输
+                                is_realtime_streaming = false;  // 等待用户开始说话才开启流式传输
                                 vad_reset_trigger(vad_inst);
                                 multinet->clean(mn_model_data);
                                 ESP_LOGI(TAG, "命令执行完成，继续录音...");
@@ -1155,6 +1155,17 @@ extern "C" void app_main(void)
                     vad_silence_frames = 0;
                     user_started_speaking = true;  // 标记用户已经开始说话
                     recording_timeout_start = 0;  // 用户说话后取消超时
+                    
+                    // 只有在用户开始说话后才开启实时流式传输
+                    if (!is_realtime_streaming) {
+                        is_realtime_streaming = true;
+                        if (is_continuous_conversation) {
+                            ESP_LOGI(TAG, "连续对话模式：检测到用户开始说话，开启实时流式传输");
+                        } else {
+                            ESP_LOGI(TAG, "首次对话：检测到用户开始说话，开启实时流式传输");
+                        }
+                    }
+                    
                     // 显示录音进度（每100ms显示一次）
                     static TickType_t last_log_time = 0;
                     TickType_t current_time = xTaskGetTickCount();
@@ -1205,7 +1216,7 @@ extern "C" void app_main(void)
                             vad_speech_detected = false;
                             vad_silence_frames = 0;
                             user_started_speaking = false;
-                            is_realtime_streaming = true;  // 重新开启实时流式传输
+                            is_realtime_streaming = !is_continuous_conversation;  // 只在非连续对话模式下开启流式传输
                             if (is_continuous_conversation)
                             {
                                 recording_timeout_start = xTaskGetTickCount();
@@ -1284,7 +1295,7 @@ extern "C" void app_main(void)
                 is_continuous_conversation = true;  // 标记为连续对话模式
                 user_started_speaking = false;
                 recording_timeout_start = xTaskGetTickCount();  // 开始超时计时
-                is_realtime_streaming = true;  // 开启实时流式传输
+                is_realtime_streaming = false;  // 在连续对话模式下，等待用户开始说话才开启流式传输
                 audio_manager->resetResponsePlayedFlag(); // 重置标志
                 // 重置VAD触发器状态
                 vad_reset_trigger(vad_inst);
