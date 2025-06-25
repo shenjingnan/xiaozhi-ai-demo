@@ -84,6 +84,9 @@ static EventGroupHandle_t s_wifi_event_group;
 
 // WebSocket客户端句柄
 static esp_websocket_client_handle_t ws_client = NULL;
+static bool ws_is_connected = false;  // WebSocket连接状态
+static TaskHandle_t ws_reconnect_task_handle = NULL;  // 重连任务句柄
+static const int WS_RECONNECT_DELAY_MS = 5000;  // 重连延迟5秒
 
 // 系统状态定义
 typedef enum
@@ -197,10 +200,12 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
     {
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "🔗 WebSocket已连接");
+        ws_is_connected = true;
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGI(TAG, "🔌 WebSocket已断开");
+        ws_is_connected = false;
         break;
 
     case WEBSOCKET_EVENT_DATA:
@@ -270,6 +275,7 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base, i
 
     case WEBSOCKET_EVENT_ERROR:
         ESP_LOGI(TAG, "❌ WebSocket错误");
+        ws_is_connected = false;
         break;
     }
 }
@@ -335,6 +341,24 @@ static void wifi_init_sta(void)
 }
 
 /**
+ * @brief WebSocket重连任务
+ */
+static void websocket_reconnect_task(void *arg)
+{
+    while (1)
+    {
+        if (!ws_is_connected && ws_client != NULL)
+        {
+            ESP_LOGI(TAG, "尝试重新连接WebSocket...");
+            esp_websocket_client_stop(ws_client);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_websocket_client_start(ws_client);
+        }
+        vTaskDelay(pdMS_TO_TICKS(WS_RECONNECT_DELAY_MS));
+    }
+}
+
+/**
  * @brief 连接WebSocket服务器
  */
 static void websocket_connect(void)
@@ -351,21 +375,18 @@ static void websocket_connect(void)
     ws_cfg.uri = WS_URI;
     ws_cfg.buffer_size = 8192;
     ws_cfg.task_stack = 8192;  // 增加任务栈大小从默认的5120到8192
+    ws_cfg.reconnect_timeout_ms = 10000;  // 10秒重连超时
+    ws_cfg.network_timeout_ms = 10000;     // 10秒网络超时
 
     ws_client = esp_websocket_client_init(&ws_cfg);
     esp_websocket_register_events(ws_client, WEBSOCKET_EVENT_ANY, websocket_event_handler, NULL);
     esp_websocket_client_start(ws_client);
 
-    // 等待连接
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    if (esp_websocket_client_is_connected(ws_client))
+    // 创建重连任务（如果还未创建）
+    if (ws_reconnect_task_handle == NULL)
     {
-        ESP_LOGI(TAG, "✅ WebSocket连接成功");
-    }
-    else
-    {
-        ESP_LOGW(TAG, "⚠️ WebSocket连接可能未就绪");
+        xTaskCreate(websocket_reconnect_task, "ws_reconnect", 4096, NULL, 5, &ws_reconnect_task_handle);
+        ESP_LOGI(TAG, "WebSocket重连任务已创建");
     }
 }
 
@@ -374,13 +395,14 @@ static void websocket_connect(void)
  */
 static void websocket_disconnect(void)
 {
+    // 注意：现在我们不再销毁WebSocket客户端，只是停止它
+    // 这样可以保持连接配置，便于后续重连
     if (ws_client != NULL)
     {
-        ESP_LOGI(TAG, "正在断开WebSocket连接...");
+        ESP_LOGI(TAG, "正在停止WebSocket连接...");
         esp_websocket_client_stop(ws_client);
-        esp_websocket_client_destroy(ws_client);
-        ws_client = NULL;
-        ESP_LOGI(TAG, "✅ WebSocket已断开");
+        ws_is_connected = false;
+        ESP_LOGI(TAG, "✅ WebSocket已停止");
     }
 }
 
@@ -431,81 +453,6 @@ static size_t audio_sent_position = 0;
 static bool is_streaming_audio = false;
 static TickType_t last_chunk_send_time = 0;
 static bool is_realtime_streaming = false;  // 实时流式传输标志
-
-/**
- * @brief 流式发送录音数据块到WebSocket服务器
- *
- * 每次发送3200字节（200ms的音频数据）
- * @return true 如果还有数据要发送，false 如果发送完成
- */
-static bool send_audio_chunk(void)
-{
-    if (audio_manager == nullptr) {
-        ESP_LOGW(TAG, "音频管理器未初始化");
-        return false;
-    }
-    
-    size_t recording_length = 0;
-    const int16_t* recording_buffer = audio_manager->getRecordingBuffer(recording_length);
-    
-    if (recording_buffer == NULL || recording_length == 0)
-    {
-        return false;
-    }
-
-    if (ws_client == NULL || !esp_websocket_client_is_connected(ws_client))
-    {
-        ESP_LOGW(TAG, "WebSocket未连接，无法发送录音数据");
-        return false;
-    }
-
-    // 计算剩余的数据量
-    size_t remaining_samples = recording_length - audio_sent_position;
-    if (remaining_samples == 0) {
-        return false;  // 没有更多数据
-    }
-
-    // 每次发送3200字节（1600个16位样本）
-    const size_t CHUNK_SAMPLES = 1600;  // 3200字节 / 2字节每样本
-    size_t samples_to_send = (remaining_samples > CHUNK_SAMPLES) ? CHUNK_SAMPLES : remaining_samples;
-    size_t bytes_to_send = samples_to_send * sizeof(int16_t);
-
-    // 发送数据块
-    const char* data_ptr = (const char*)(recording_buffer + audio_sent_position);
-    esp_websocket_client_send_bin(ws_client, data_ptr, bytes_to_send, portMAX_DELAY);
-    
-    audio_sent_position += samples_to_send;
-    last_chunk_send_time = xTaskGetTickCount();
-    
-    ESP_LOGD(TAG, "发送音频块: %zu 字节, 进度: %zu/%zu 样本", 
-             bytes_to_send, audio_sent_position, recording_length);
-
-    // 如果是第一次发送，记录日志
-    if (audio_sent_position == samples_to_send) {
-        ESP_LOGI(TAG, "开始流式发送录音数据...");
-    }
-
-    // 检查是否发送完成
-    if (audio_sent_position >= recording_length) {
-        ESP_LOGI(TAG, "✅ 录音数据流式发送完成，总计: %zu 样本 (%.2f 秒)", 
-                 recording_length, (float)recording_length / SAMPLE_RATE);
-        audio_sent_position = 0;  // 重置位置
-        is_streaming_audio = false;
-        return false;  // 发送完成
-    }
-
-    return true;  // 还有数据要发送
-}
-
-/**
- * @brief 开始流式发送录音数据
- */
-static void start_streaming_audio(void)
-{
-    audio_sent_position = 0;
-    is_streaming_audio = true;
-    last_chunk_send_time = xTaskGetTickCount();
-}
 
 /**
  * @brief 配置自定义命令词
@@ -613,43 +560,6 @@ static const char *get_command_description(int command_id)
 }
 
 /**
- * @brief 发送录音缓冲区的所有音频数据
- *
- * 一次性发送完整的录音数据（二进制格式）
- */
-static void send_recorded_audio(void)
-{
-    if (audio_manager == nullptr) {
-        ESP_LOGW(TAG, "音频管理器未初始化");
-        return;
-    }
-    
-    size_t recording_length = 0;
-    const int16_t* recording_buffer = audio_manager->getRecordingBuffer(recording_length);
-    
-    if (recording_buffer == NULL || recording_length == 0)
-    {
-        ESP_LOGW(TAG, "没有录音数据可发送");
-        return;
-    }
-
-    if (ws_client == NULL || !esp_websocket_client_is_connected(ws_client))
-    {
-        ESP_LOGW(TAG, "WebSocket未连接，无法发送录音数据");
-        return;
-    }
-
-    size_t data_size = recording_length * sizeof(int16_t);
-    ESP_LOGI(TAG, "开始发送录音数据，总大小: %zu 样本 (%.2f 秒), %zu 字节",
-             recording_length, (float)recording_length / SAMPLE_RATE, data_size);
-
-    // 直接发送二进制PCM数据
-    esp_websocket_client_send_bin(ws_client, (const char *)recording_buffer, data_size, portMAX_DELAY);
-    ESP_LOGI(TAG, "✅ 录音数据发送完成（二进制格式）");
-}
-
-
-/**
  * @brief 播放音频的包装函数
  *
  * @param audio_data 音频数据
@@ -717,6 +627,11 @@ extern "C" void app_main(void)
     // ========== 第三步：初始化WiFi ==========
     ESP_LOGI(TAG, "正在连接WiFi...");
     wifi_init_sta();
+    
+    // ========== 第四步：初始化WebSocket连接 ==========
+    // 在WiFi连接成功后立即连接WebSocket
+    ESP_LOGI(TAG, "正在初始化WebSocket连接...");
+    websocket_connect();
 
     // ========== 第四步：初始化INMP441麦克风硬件 ==========
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
@@ -1002,11 +917,16 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "🎉 检测到唤醒词 '你好小智'！");
                 printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
 
-                // 连接WebSocket
-                websocket_connect();
+                // WebSocket应该已经连接，如果没有连接则尝试重新启动
+                if (!ws_is_connected && ws_client != NULL)
+                {
+                    ESP_LOGI(TAG, "WebSocket未连接，尝试重新启动...");
+                    esp_websocket_client_start(ws_client);
+                    vTaskDelay(pdMS_TO_TICKS(500));  // 等待连接
+                }
 
                 // 通过WebSocket发送唤醒词检测事件
-                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                if (ws_is_connected && ws_client != NULL)
                 {
                     char wake_msg[256];
                     snprintf(wake_msg, sizeof(wake_msg),
@@ -1021,7 +941,7 @@ extern "C" void app_main(void)
                 play_audio_with_stop(hi, hi_len, "欢迎音频");
 
                 // 发送开始录音事件
-                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                if (ws_is_connected && ws_client != NULL)
                 {
                     const char* start_msg = "{\"event\":\"recording_started\"}";
                     esp_websocket_client_send_text(ws_client, start_msg, strlen(start_msg), portMAX_DELAY);
@@ -1054,7 +974,7 @@ extern "C" void app_main(void)
                 audio_manager->addRecordingData(processed_audio, samples);
                 
                 // 实时流式发送音频数据到服务器
-                if (is_realtime_streaming && ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                if (is_realtime_streaming && ws_is_connected && ws_client != NULL)
                 {
                     // 直接发送当前音频块
                     size_t bytes_to_send = samples * sizeof(int16_t);
@@ -1189,7 +1109,7 @@ extern "C" void app_main(void)
                         if (user_started_speaking && rec_len > SAMPLE_RATE / 4) // 至少0.25秒的音频
                         {
                             // 发送录音结束事件
-                            if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                            if (ws_is_connected && ws_client != NULL)
                             {
                                 const char* end_msg = "{\"event\":\"recording_ended\"}";
                                 esp_websocket_client_send_text(ws_client, end_msg, strlen(end_msg), portMAX_DELAY);
@@ -1205,7 +1125,7 @@ extern "C" void app_main(void)
                         {
                             ESP_LOGI(TAG, "录音时间过短或用户未说话，重新开始录音");
                             // 发送录音取消事件
-                            if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                            if (ws_is_connected && ws_client != NULL)
                             {
                                 const char* cancel_msg = "{\"event\":\"recording_cancelled\"}";
                                 esp_websocket_client_send_text(ws_client, cancel_msg, strlen(cancel_msg), portMAX_DELAY);
@@ -1235,7 +1155,7 @@ extern "C" void app_main(void)
                 is_realtime_streaming = false;  // 停止实时流式传输
 
                 // 发送录音结束事件
-                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                if (ws_is_connected && ws_client != NULL)
                 {
                     const char* end_msg = "{\"event\":\"recording_ended\"}";
                     esp_websocket_client_send_text(ws_client, end_msg, strlen(end_msg), portMAX_DELAY);
@@ -1281,7 +1201,7 @@ extern "C" void app_main(void)
             {
                 // 响应已播放完成，重新进入录音状态（连续对话）
                 // 发送开始录音事件
-                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                if (ws_is_connected && ws_client != NULL)
                 {
                     const char* start_msg = "{\"event\":\"recording_started\"}";
                     esp_websocket_client_send_text(ws_client, start_msg, strlen(start_msg), portMAX_DELAY);
@@ -1413,6 +1333,21 @@ extern "C" void app_main(void)
     if (buffer != NULL)
     {
         free(buffer);
+    }
+
+    // 停止WebSocket重连任务
+    if (ws_reconnect_task_handle != NULL)
+    {
+        vTaskDelete(ws_reconnect_task_handle);
+        ws_reconnect_task_handle = NULL;
+    }
+
+    // 清理WebSocket客户端
+    if (ws_client != NULL)
+    {
+        esp_websocket_client_stop(ws_client);
+        esp_websocket_client_destroy(ws_client);
+        ws_client = NULL;
     }
 
     // 释放音频管理器
