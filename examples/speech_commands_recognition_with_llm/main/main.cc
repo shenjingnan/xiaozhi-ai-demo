@@ -75,7 +75,7 @@ static const char *TAG = "语音识别"; // 日志标签
 #define WIFI_MAXIMUM_RETRY 5
 
 // WebSocket配置
-#define WS_URI "ws://192.168.1.163:8888" // 需要替换为实际的服务器IP
+#define WS_URI "ws://192.168.1.175:8888" // 需要替换为实际的服务器IP
 
 // WiFi事件组
 static EventGroupHandle_t s_wifi_event_group;
@@ -430,6 +430,7 @@ static void led_turn_off(void)
 static size_t audio_sent_position = 0;
 static bool is_streaming_audio = false;
 static TickType_t last_chunk_send_time = 0;
+static bool is_realtime_streaming = false;  // 实时流式传输标志
 
 /**
  * @brief 流式发送录音数据块到WebSocket服务器
@@ -1019,6 +1020,14 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "播放欢迎音频...");
                 play_audio_with_stop(hi, hi_len, "欢迎音频");
 
+                // 发送开始录音事件
+                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                {
+                    const char* start_msg = "{\"event\":\"recording_started\"}";
+                    esp_websocket_client_send_text(ws_client, start_msg, strlen(start_msg), portMAX_DELAY);
+                    ESP_LOGI(TAG, "发送录音开始事件");
+                }
+
                 // 切换到录音状态
                 current_state = STATE_RECORDING;
                 audio_manager->startRecording();
@@ -1027,6 +1036,7 @@ extern "C" void app_main(void)
                 is_continuous_conversation = false;  // 第一次录音，不是连续对话
                 user_started_speaking = false;
                 recording_timeout_start = 0;  // 第一次录音不需要超时
+                is_realtime_streaming = true;  // 开启实时流式传输
                 // 重置VAD触发器状态
                 vad_reset_trigger(vad_inst);
                 // 重置命令词识别缓冲区
@@ -1042,6 +1052,15 @@ extern "C" void app_main(void)
                 // 将音频数据存入录音缓冲区
                 int samples = audio_chunksize / sizeof(int16_t);
                 audio_manager->addRecordingData(processed_audio, samples);
+                
+                // 实时流式发送音频数据到服务器
+                if (is_realtime_streaming && ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                {
+                    // 直接发送当前音频块
+                    size_t bytes_to_send = samples * sizeof(int16_t);
+                    esp_websocket_client_send_bin(ws_client, (const char*)processed_audio, bytes_to_send, portMAX_DELAY);
+                    ESP_LOGD(TAG, "实时发送音频块: %zu 字节", bytes_to_send);
+                }
                 
                 // 如果是连续对话模式，同时进行命令词检测
                 if (is_continuous_conversation)
@@ -1076,6 +1095,7 @@ extern "C" void app_main(void)
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
                                 recording_timeout_start = xTaskGetTickCount();
+                                is_realtime_streaming = true;  // 重新开启实时流式传输
                                 vad_reset_trigger(vad_inst);
                                 multinet->clean(mn_model_data);
                                 ESP_LOGI(TAG, "命令执行完成，继续录音...");
@@ -1093,6 +1113,7 @@ extern "C" void app_main(void)
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
                                 recording_timeout_start = xTaskGetTickCount();
+                                is_realtime_streaming = true;  // 重新开启实时流式传输
                                 vad_reset_trigger(vad_inst);
                                 multinet->clean(mn_model_data);
                                 ESP_LOGI(TAG, "命令执行完成，继续录音...");
@@ -1115,6 +1136,7 @@ extern "C" void app_main(void)
                                 vad_silence_frames = 0;
                                 user_started_speaking = false;
                                 recording_timeout_start = xTaskGetTickCount();
+                                is_realtime_streaming = true;  // 重新开启实时流式传输
                                 vad_reset_trigger(vad_inst);
                                 multinet->clean(mn_model_data);
                                 ESP_LOGI(TAG, "命令执行完成，继续录音...");
@@ -1148,15 +1170,20 @@ extern "C" void app_main(void)
                         ESP_LOGI(TAG, "VAD检测到用户说话结束，录音长度: %.2f 秒",
                                  audio_manager->getRecordingDuration());
                         audio_manager->stopRecording();
+                        is_realtime_streaming = false;  // 停止实时流式传输
 
                         // 只有在用户确实说话了才发送数据
                         size_t rec_len = 0;
                         audio_manager->getRecordingBuffer(rec_len);
                         if (user_started_speaking && rec_len > SAMPLE_RATE / 4) // 至少0.25秒的音频
                         {
-                            // 发送录音数据到Python脚本（使用流式发送）
-                            ESP_LOGI(TAG, "正在发送录音数据到电脑...");
-                            start_streaming_audio();  // 初始化流式发送
+                            // 发送录音结束事件
+                            if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                            {
+                                const char* end_msg = "{\"event\":\"recording_ended\"}";
+                                esp_websocket_client_send_text(ws_client, end_msg, strlen(end_msg), portMAX_DELAY);
+                                ESP_LOGI(TAG, "发送录音结束事件");
+                            }
                             
                             // 切换到等待响应状态
                             current_state = STATE_WAITING_RESPONSE;
@@ -1166,12 +1193,19 @@ extern "C" void app_main(void)
                         else
                         {
                             ESP_LOGI(TAG, "录音时间过短或用户未说话，重新开始录音");
+                            // 发送录音取消事件
+                            if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                            {
+                                const char* cancel_msg = "{\"event\":\"recording_cancelled\"}";
+                                esp_websocket_client_send_text(ws_client, cancel_msg, strlen(cancel_msg), portMAX_DELAY);
+                            }
                             // 重新开始录音
                             audio_manager->clearRecordingBuffer();
                             audio_manager->startRecording();
                             vad_speech_detected = false;
                             vad_silence_frames = 0;
                             user_started_speaking = false;
+                            is_realtime_streaming = true;  // 重新开启实时流式传输
                             if (is_continuous_conversation)
                             {
                                 recording_timeout_start = xTaskGetTickCount();
@@ -1187,10 +1221,15 @@ extern "C" void app_main(void)
                 // 录音缓冲区满了，强制停止录音
                 ESP_LOGW(TAG, "录音缓冲区已满，停止录音");
                 audio_manager->stopRecording();
+                is_realtime_streaming = false;  // 停止实时流式传输
 
-                // 发送录音数据到Python脚本（使用流式发送）
-                ESP_LOGI(TAG, "正在发送录音数据到电脑...");
-                start_streaming_audio();  // 初始化流式发送
+                // 发送录音结束事件
+                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                {
+                    const char* end_msg = "{\"event\":\"recording_ended\"}";
+                    esp_websocket_client_send_text(ws_client, end_msg, strlen(end_msg), portMAX_DELAY);
+                    ESP_LOGI(TAG, "发送录音结束事件（缓冲区满）");
+                }
 
                 // 切换到等待响应状态
                 current_state = STATE_WAITING_RESPONSE;
@@ -1223,25 +1262,20 @@ extern "C" void app_main(void)
         }
         else if (current_state == STATE_WAITING_RESPONSE)
         {
-            // 等待响应状态：流式发送音频并等待响应
-            
-            // 如果正在流式发送音频，继续发送
-            if (is_streaming_audio) {
-                // 每50ms发送一个音频块（类似qwen_demo.py）
-                TickType_t current_time = xTaskGetTickCount();
-                if (current_time - last_chunk_send_time >= pdMS_TO_TICKS(50)) {
-                    if (!send_audio_chunk()) {
-                        // 音频发送完成
-                        is_streaming_audio = false;
-                    }
-                }
-            }
+            // 等待响应状态：服务器正在处理并发送响应
             
             // 响应音频的播放在WebSocket事件处理器中完成
             // 检查是否已经播放完成
             if (audio_manager->isResponsePlayed())
             {
                 // 响应已播放完成，重新进入录音状态（连续对话）
+                // 发送开始录音事件
+                if (ws_client != NULL && esp_websocket_client_is_connected(ws_client))
+                {
+                    const char* start_msg = "{\"event\":\"recording_started\"}";
+                    esp_websocket_client_send_text(ws_client, start_msg, strlen(start_msg), portMAX_DELAY);
+                }
+                
                 current_state = STATE_RECORDING;
                 audio_manager->clearRecordingBuffer();
                 audio_manager->startRecording();
@@ -1250,6 +1284,7 @@ extern "C" void app_main(void)
                 is_continuous_conversation = true;  // 标记为连续对话模式
                 user_started_speaking = false;
                 recording_timeout_start = xTaskGetTickCount();  // 开始超时计时
+                is_realtime_streaming = true;  // 开启实时流式传输
                 audio_manager->resetResponsePlayedFlag(); // 重置标志
                 // 重置VAD触发器状态
                 vad_reset_trigger(vad_inst);

@@ -81,27 +81,35 @@ class WebSocketAudioServer:
         """处理客户端连接"""
         client_ip = websocket.remote_address[0]
         print(f"\n🔗 新的客户端连接: {client_ip}")
+        
+        # 客户端状态
+        client_state = {
+            'is_recording': False,
+            'realtime_client': None,
+            'message_task': None,
+            'audio_buffer': bytearray(),
+            'audio_tracker': {'total_sent': 0, 'last_time': time.time()}
+        }
 
         try:
             async for message in websocket:
                 try:
                     # 检查消息类型
                     if isinstance(message, bytes):
-                        # 二进制音频数据 - 开始流式处理
-                        print(
-                            f"🎤 [{client_ip}] 接收到第一个音频块: {len(message)} 字节，开始流式处理..."
-                        )
-                        
-                        # 将第一个消息放回处理流程
-                        async def message_generator():
-                            yield message
-                            async for msg in websocket:
-                                yield msg
-                        
-                        # 处理流式音频
-                        await self.process_streaming_audio_with_first_message(
-                            websocket, client_ip, message
-                        )
+                        # 二进制音频数据 - 实时转发到LLM
+                        if client_state['is_recording'] and client_state['realtime_client']:
+                            # 添加到缓冲区（用于保存）
+                            client_state['audio_buffer'].extend(message)
+                            
+                            # 实时转发到LLM
+                            encoded_data = base64.b64encode(message).decode("utf-8")
+                            event = {
+                                "event_id": "event_" + str(int(time.time() * 1000)),
+                                "type": "input_audio_buffer.append",
+                                "audio": encoded_data,
+                            }
+                            await client_state['realtime_client'].send_event(event)
+                            print(f"   实时转发音频块: {len(message)} 字节")
                         continue
 
                     # 解析JSON消息
@@ -110,42 +118,96 @@ class WebSocketAudioServer:
 
                     if event == "wake_word_detected":
                         print(f"🎉 [{client_ip}] 检测到唤醒词！")
-
-                    elif event == "audio_data":
-                        # JSON格式的音频数据（保留兼容性）
-                        audio_base64 = data.get("data", "")
-                        audio_size = data.get("size", 0)
-
-                        print(
-                            f"🎤 [{client_ip}] 接收到JSON格式音频数据: {audio_size} 字节"
-                        )
-
-                        try:
-                            # Base64解码
-                            audio_bytes = base64.b64decode(audio_base64)
-
+                        
+                    elif event == "recording_started":
+                        print(f"🎤 [{client_ip}] 开始录音...")
+                        client_state['is_recording'] = True
+                        client_state['audio_buffer'] = bytearray()
+                        client_state['audio_tracker'] = {'total_sent': 0, 'last_time': time.time()}
+                        
+                        # 初始化LLM连接
+                        if self.use_model:
+                            try:
+                                # 创建大模型客户端
+                                client_state['realtime_client'] = OmniRealtimeClient(
+                                    base_url="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
+                                    api_key=self.api_key,
+                                    model="qwen-omni-turbo-realtime-2025-05-08",
+                                    voice="Chelsie",
+                                    on_audio_delta=lambda audio: asyncio.create_task(
+                                        self.on_audio_delta_handler(websocket, client_ip, audio, client_state['audio_tracker'])
+                                    ),
+                                    turn_detection_mode=TurnDetectionMode.MANUAL,
+                                )
+                                
+                                # 连接到大模型
+                                await client_state['realtime_client'].connect()
+                                
+                                # 启动消息处理
+                                client_state['message_task'] = asyncio.create_task(
+                                    client_state['realtime_client'].handle_messages()
+                                )
+                                
+                                print(f"✅ [{client_ip}] LLM连接成功，准备接收实时音频")
+                                
+                            except Exception as e:
+                                print(f"❌ [{client_ip}] 初始化大模型失败: {e}")
+                                client_state['realtime_client'] = None
+                    
+                    elif event == "recording_ended":
+                        print(f"✅ [{client_ip}] 录音结束")
+                        client_state['is_recording'] = False
+                        
+                        # 保存音频
+                        if len(client_state['audio_buffer']) > 0:
+                            print(f"📊 [{client_ip}] 音频总大小: {len(client_state['audio_buffer'])} 字节 ({len(client_state['audio_buffer'])/2/SAMPLE_RATE:.2f}秒)")
+                            
                             # 保存音频
                             current_timestamp = datetime.now()
-                            saved_file = await self.save_audio(
-                                [audio_bytes], current_timestamp
-                            )
+                            saved_file = await self.save_audio([bytes(client_state['audio_buffer'])], current_timestamp)
                             if saved_file:
                                 print(f"✅ [{client_ip}] 音频已保存: {saved_file}")
-
-                            # 等待一下再发送响应
-                            print(f"⏳ [{client_ip}] 等待0.5秒后发送响应音频...")
-                            await asyncio.sleep(0.5)
-
-                            # 发送响应音频
-                            if self.use_model:
-                                await self.send_model_response_audio(
-                                    websocket, client_ip, audio_bytes
-                                )
-                            else:
+                        
+                        # 触发LLM响应生成
+                        if self.use_model and client_state['realtime_client']:
+                            try:
+                                # 手动触发响应生成
+                                await client_state['realtime_client'].create_response()
+                                
+                                # 等待响应完成（最多30秒）
+                                print(f"🤖 [{client_ip}] 等待模型生成响应...")
+                                max_wait_time = 30
+                                start_time = time.time()
+                                
+                                while time.time() - start_time < max_wait_time:
+                                    await asyncio.sleep(0.1)
+                                    
+                                    # 如果超过2秒没有新的音频数据发送，认为响应结束
+                                    if client_state['audio_tracker']['total_sent'] > 0 and \
+                                       time.time() - client_state['audio_tracker']['last_time'] > 2.0:
+                                        print(f"✅ [{client_ip}] 响应音频发送完成，总计: {client_state['audio_tracker']['total_sent']} 字节")
+                                        break
+                                
+                                # 如果没有收到任何音频响应，使用默认音频
+                                if client_state['audio_tracker']['total_sent'] == 0:
+                                    print(f"⚠️ [{client_ip}] 未收到大模型响应，使用默认音频")
+                                    await self.send_response_audio_stream(websocket, client_ip)
+                                
+                                # 发送ping作为音频结束标志
+                                await websocket.ping()
+                                
+                            except Exception as e:
+                                print(f"❌ [{client_ip}] 模型处理失败: {e}")
+                                # 失败时使用默认音频
                                 await self.send_response_audio(websocket, client_ip)
-
-                        except Exception as e:
-                            print(f"❌ [{client_ip}] 音频处理失败: {e}")
+                        else:
+                            # 不使用模型，发送默认音频
+                            await self.send_response_audio(websocket, client_ip)
+                    
+                    elif event == "recording_cancelled":
+                        print(f"⚠️ [{client_ip}] 录音取消")
+                        client_state['is_recording'] = False
+                        client_state['audio_buffer'] = bytearray()
 
                 except json.JSONDecodeError as e:
                     print(f"❌ [{client_ip}] JSON解析错误: {e}")
@@ -156,147 +218,17 @@ class WebSocketAudioServer:
             print(f"🔌 [{client_ip}] 客户端断开连接")
         except Exception as e:
             print(f"❌ [{client_ip}] 连接错误: {e}")
-
-    async def process_streaming_audio_with_first_message(self, websocket, client_ip, first_message):
-        """处理流式音频数据（包括第一个消息）"""
-        print(f"🎤 [{client_ip}] 开始接收流式音频数据...")
-        
-        # 音频数据缓冲区
-        audio_buffer = bytearray()
-        audio_buffer.extend(first_message)
-        
-        # 创建一个任务来直接转发音频到LLM
-        realtime_client = None
-        send_task = None
-        
-        # 创建音频跟踪器
-        audio_tracker = {'total_sent': 0, 'last_time': time.time()}
-        
-        if self.use_model:
-            try:
-                # 创建大模型客户端
-                realtime_client = OmniRealtimeClient(
-                    base_url="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
-                    api_key=self.api_key,
-                    model="qwen-omni-turbo-realtime-2025-05-08",
-                    voice="Chelsie",
-                    on_audio_delta=lambda audio: asyncio.create_task(self.on_audio_delta_handler(websocket, client_ip, audio, audio_tracker)),
-                    turn_detection_mode=TurnDetectionMode.MANUAL,
-                )
-                
-                # 连接到大模型
-                await realtime_client.connect()
-                
-                # 启动消息处理
-                message_task = asyncio.create_task(realtime_client.handle_messages())
-                
-                # 发送第一个音频块
-                encoded_data = base64.b64encode(first_message).decode("utf-8")
-                event = {
-                    "event_id": "event_" + str(int(time.time() * 1000)),
-                    "type": "input_audio_buffer.append",
-                    "audio": encoded_data,
-                }
-                await realtime_client.send_event(event)
-                
-            except Exception as e:
-                print(f"❌ [{client_ip}] 初始化大模型失败: {e}")
-                self.use_model = False
-        
-        # 继续接收音频数据
-        last_receive_time = time.time()
-        silence_duration = 0
-        
-        while True:
-            try:
-                # 接收数据（设置较短超时）
-                message = await asyncio.wait_for(websocket.recv(), timeout=0.5)
-                
-                if isinstance(message, bytes):
-                    # 二进制音频数据
-                    audio_buffer.extend(message)
-                    print(f"   收到音频块: {len(message)} 字节, 总计: {len(audio_buffer)} 字节")
-                    
-                    # 如果使用模型，直接转发到LLM
-                    if self.use_model and realtime_client:
-                        encoded_data = base64.b64encode(message).decode("utf-8")
-                        event = {
-                            "event_id": "event_" + str(int(time.time() * 1000)),
-                            "type": "input_audio_buffer.append",
-                            "audio": encoded_data,
-                        }
-                        await realtime_client.send_event(event)
-                    
-                    last_receive_time = time.time()
-                    silence_duration = 0
-                else:
-                    # 非二进制消息，可能是控制消息
-                    break
-                    
-            except asyncio.TimeoutError:
-                # 检查静音时长
-                current_time = time.time()
-                silence_duration = current_time - last_receive_time
-                
-                # 如果超过1秒没有新数据，认为录音结束
-                if silence_duration > 1.0:
-                    print(f"⏰ [{client_ip}] 检测到静音超过1秒，结束录音")
-                    break
-                    
-            except Exception as e:
-                print(f"❌ [{client_ip}] 接收音频数据失败: {e}")
-                break
-        
-        # 音频接收完成
-        if len(audio_buffer) > 0:
-            print(f"✅ [{client_ip}] 音频接收完成，总大小: {len(audio_buffer)} 字节 ({len(audio_buffer)/2/SAMPLE_RATE:.2f}秒)")
-            
-            # 保存音频
-            current_timestamp = datetime.now()
-            saved_file = await self.save_audio([bytes(audio_buffer)], current_timestamp)
-            if saved_file:
-                print(f"✅ [{client_ip}] 音频已保存: {saved_file}")
-            
-            # 如果使用模型，触发响应生成
-            if self.use_model and realtime_client:
+        finally:
+            # 清理资源
+            if client_state['realtime_client']:
                 try:
-                    # 手动触发响应生成
-                    await realtime_client.create_response()
-                    
-                    # 等待响应完成（最多30秒）
-                    print(f"🤖 [{client_ip}] 等待模型生成响应...")
-                    max_wait_time = 30  # 最多等待30秒
-                    start_time = time.time()
-                    
-                    while time.time() - start_time < max_wait_time:
-                        await asyncio.sleep(0.1)
-                        
-                        # 如果超过2秒没有新的音频数据发送，认为响应结束
-                        if audio_tracker['total_sent'] > 0 and time.time() - audio_tracker['last_time'] > 2.0:
-                            print(f"✅ [{client_ip}] 响应音频发送完成，总计: {audio_tracker['total_sent']} 字节")
-                            break
-                    
-                    # 如果没有收到任何音频响应，使用默认音频
-                    if audio_tracker['total_sent'] == 0:
-                        print(f"⚠️ [{client_ip}] 未收到大模型响应，使用默认音频")
-                        await self.send_response_audio_stream(websocket, client_ip)
-                    
-                    # 发送ping作为音频结束标志
-                    await websocket.ping()
-                    
-                    # 清理
-                    message_task.cancel()
-                    await realtime_client.close()
-                    
-                except Exception as e:
-                    print(f"❌ [{client_ip}] 模型处理失败: {e}")
-                    # 失败时使用默认音频
-                    await self.send_response_audio(websocket, client_ip)
-            else:
-                # 不使用模型，发送默认音频
-                await self.send_response_audio(websocket, client_ip)
-        else:
-            print(f"⚠️ [{client_ip}] 没有接收到音频数据")
+                    if client_state['message_task']:
+                        client_state['message_task'].cancel()
+                    await client_state['realtime_client'].close()
+                except:
+                    pass
+
+    # 删除不再需要的process_streaming_audio_with_first_message方法
     
     async def on_audio_delta_handler(self, websocket, client_ip, audio_data, audio_tracker):
         """处理模型返回的音频片段"""
