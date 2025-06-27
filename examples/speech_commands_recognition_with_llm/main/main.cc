@@ -72,7 +72,7 @@ static const char *TAG = "语音识别"; // 日志标签
 #define WIFI_PASS "Sjn123123@"
 
 // WebSocket配置
-#define WS_URI "ws://192.168.1.175:8888" // 需要替换为实际的服务器IP
+#define WS_URI "ws://192.168.1.174:8888" // 请改为您的电脑IP地址:8888
 
 // WiFi和WebSocket管理器
 static WiFiManager* wifi_manager = nullptr;
