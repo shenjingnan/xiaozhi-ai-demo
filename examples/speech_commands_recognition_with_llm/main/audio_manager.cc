@@ -1,6 +1,9 @@
 /**
  * @file audio_manager.cc
- * @brief 音频管理器类实现
+ * @brief 🎧 音频管理器实现文件
+ * 
+ * 这里实现了audio_manager.h中声明的所有功能。
+ * 主要包括录音缓冲区管理、音频播放控制和流式播放。
  */
 
 extern "C" {
@@ -36,9 +39,9 @@ AudioManager::AudioManager(uint32_t sample_rate, uint32_t recording_duration_sec
     , streaming_write_pos(0)
     , streaming_read_pos(0)
 {
-    // 计算缓冲区大小
-    recording_buffer_size = sample_rate * recording_duration_sec;  // 样本数
-    response_buffer_size = sample_rate * response_duration_sec * sizeof(int16_t);  // 字节数
+    // 🧮 计算所需缓冲区大小
+    recording_buffer_size = sample_rate * recording_duration_sec;  // 录音缓冲区（样本数）
+    response_buffer_size = sample_rate * response_duration_sec * sizeof(int16_t);  // 响应缓冲区（字节数）
 }
 
 AudioManager::~AudioManager() {
@@ -106,7 +109,7 @@ void AudioManager::deinit() {
     }
 }
 
-// ========== 录音相关实现 ==========
+// 🎙️ ========== 录音功能实现 ==========
 
 void AudioManager::startRecording() {
     is_recording = true;
@@ -125,13 +128,13 @@ bool AudioManager::addRecordingData(const int16_t* data, size_t samples) {
         return false;
     }
     
-    // 检查缓冲区是否有足够空间
+    // 📏 检查缓冲区是否还有空间
     if (recording_length + samples > recording_buffer_size) {
-        ESP_LOGW(TAG, "录音缓冲区已满");
+        ESP_LOGW(TAG, "录音缓冲区已满（超过10秒上限）");
         return false;
     }
     
-    // 复制数据到缓冲区
+    // 💾 将新的音频数据追加到缓冲区末尾
     memcpy(&recording_buffer[recording_length], data, samples * sizeof(int16_t));
     recording_length += samples;
     
@@ -155,7 +158,7 @@ bool AudioManager::isRecordingBufferFull() const {
     return recording_length >= recording_buffer_size;
 }
 
-// ========== 响应音频相关实现 ==========
+// 🔊 ========== 音频播放功能实现 ==========
 
 void AudioManager::startReceivingResponse() {
     response_length = 0;
@@ -186,7 +189,7 @@ esp_err_t AudioManager::finishResponseAndPlay() {
     ESP_LOGI(TAG, "📢 播放响应音频: %zu 样本 (%.2f 秒)",
              response_length, (float)response_length / sample_rate);
     
-    // 添加重试机制确保音频播放完整
+    // 🔁 添加重试机制，确保音频可靠播放
     int retry_count = 0;
     const int max_retries = 3;
     esp_err_t audio_ret = ESP_FAIL;
@@ -194,15 +197,15 @@ esp_err_t AudioManager::finishResponseAndPlay() {
     while (retry_count < max_retries && audio_ret != ESP_OK) {
         audio_ret = bsp_play_audio((const uint8_t*)response_buffer, response_length * sizeof(int16_t));
         if (audio_ret == ESP_OK) {
-            ESP_LOGI(TAG, "✅ 响应音频播放完成");
+            ESP_LOGI(TAG, "✅ 响应音频播放成功");
             response_played = true;
             break;
         } else {
-            ESP_LOGE(TAG, "❌ 音频数据写入失败 (尝试 %d/%d): %s",
-                     retry_count + 1, max_retries, esp_err_to_name(audio_ret));
+            ESP_LOGE(TAG, "❌ 音频播放失败 (第%d次尝试): %s",
+                     retry_count + 1, esp_err_to_name(audio_ret));
             retry_count++;
             if (retry_count < max_retries) {
-                vTaskDelay(pdMS_TO_TICKS(100)); // 等待100ms后重试
+                vTaskDelay(pdMS_TO_TICKS(100)); // 等100ms再试
             }
         }
     }
@@ -221,7 +224,7 @@ esp_err_t AudioManager::playAudio(const uint8_t* audio_data, size_t data_len, co
     return ret;
 }
 
-// ========== WebSocket音频处理实现 ==========
+// 🌐 ========== 网络音频处理（旧版本，现已弃用） ==========
 
 bool AudioManager::processWebSocketData(uint8_t op_code, const uint8_t* data, size_t data_len, bool is_waiting_response) {
     // 检查是否是完整的数据包
@@ -318,7 +321,7 @@ bool AudioManager::processWebSocketData(uint8_t op_code, const uint8_t* data, si
     return false;  // 还在处理中
 }
 
-// ========== 流式音频播放实现 ==========
+// 🌊 ========== 流式播放功能实现 ==========
 
 void AudioManager::startStreamingPlayback() {
     ESP_LOGI(TAG, "开始流式音频播放");
@@ -337,11 +340,13 @@ bool AudioManager::addStreamingAudioChunk(const uint8_t* data, size_t size) {
         return false;
     }
     
-    // 计算可用空间
+    // 📏 计算环形缓冲区的剩余空间
     size_t available_space;
     if (streaming_write_pos >= streaming_read_pos) {
+        // 写指针在读指针后面
         available_space = streaming_buffer_size - (streaming_write_pos - streaming_read_pos) - 1;
     } else {
+        // 写指针在读指针前面（已绕回）
         available_space = streaming_read_pos - streaming_write_pos - 1;
     }
     
@@ -350,14 +355,14 @@ bool AudioManager::addStreamingAudioChunk(const uint8_t* data, size_t size) {
         return false;
     }
     
-    // 写入数据到环形缓冲区
+    // 📝 将数据写入环形缓冲区
     size_t bytes_to_end = streaming_buffer_size - streaming_write_pos;
     if (size <= bytes_to_end) {
-        // 数据可以一次性写入
+        // 简单情况：数据不跨越缓冲区末尾
         memcpy(streaming_buffer + streaming_write_pos, data, size);
         streaming_write_pos += size;
     } else {
-        // 数据需要分两次写入
+        // 复杂情况：数据跨越末尾，需要分两段写入
         memcpy(streaming_buffer + streaming_write_pos, data, bytes_to_end);
         memcpy(streaming_buffer, data + bytes_to_end, size - bytes_to_end);
         streaming_write_pos = size - bytes_to_end;
@@ -371,19 +376,21 @@ bool AudioManager::addStreamingAudioChunk(const uint8_t* data, size_t size) {
     ESP_LOGD(TAG, "添加流式音频块: %zu 字节, 写位置: %zu, 读位置: %zu", 
              size, streaming_write_pos, streaming_read_pos);
     
-    // 检查是否有足够的数据可以播放
+    // 🔍 检查是否有足够的数据可以播放
     size_t available_data;
     if (streaming_write_pos >= streaming_read_pos) {
+        // 简单情况：写指针在读指针后面
         available_data = streaming_write_pos - streaming_read_pos;
     } else {
+        // 复杂情况：数据跨越了缓冲区末尾
         available_data = streaming_buffer_size - streaming_read_pos + streaming_write_pos;
     }
     
-    // 如果有足够的数据，开始播放
+    // 🎵 如果积累了足够的数据（200ms），开始播放
     while (available_data >= STREAMING_CHUNK_SIZE) {
         uint8_t chunk[STREAMING_CHUNK_SIZE];
         
-        // 从环形缓冲区读取数据
+        // 📖 从环形缓冲区读取一块数据
         size_t bytes_to_end = streaming_buffer_size - streaming_read_pos;
         if (STREAMING_CHUNK_SIZE <= bytes_to_end) {
             memcpy(chunk, streaming_buffer + streaming_read_pos, STREAMING_CHUNK_SIZE);
@@ -399,7 +406,7 @@ bool AudioManager::addStreamingAudioChunk(const uint8_t* data, size_t size) {
             streaming_read_pos = 0;
         }
         
-        // 播放音频块（使用流式版本，不停止I2S）
+        // 🎶 播放这一块音频（使用流式版本，不会中断播放）
         esp_err_t ret = bsp_play_audio_stream(chunk, STREAMING_CHUNK_SIZE);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "流式音频播放失败: %s", esp_err_to_name(ret));
@@ -424,7 +431,7 @@ void AudioManager::finishStreamingPlayback() {
     
     ESP_LOGI(TAG, "结束流式音频播放");
     
-    // 播放剩余的数据
+    // 🎬 处理最后的尾巴数据（不足200ms的部分）
     size_t remaining_data;
     if (streaming_write_pos >= streaming_read_pos) {
         remaining_data = streaming_write_pos - streaming_read_pos;
@@ -445,7 +452,7 @@ void AudioManager::finishStreamingPlayback() {
                 memcpy(remaining_buffer + bytes_to_end, streaming_buffer, streaming_write_pos);
             }
             
-            // 播放剩余数据（使用普通版本，因为这是最后的数据）
+            // 🎹 播放最后的尾巴数据（使用普通版本，会停止I2S）
             esp_err_t ret = bsp_play_audio(remaining_buffer, remaining_data);
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "✅ 播放剩余音频: %zu 字节", remaining_data);

@@ -84,7 +84,7 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
         return ret;
     }
 
-    // 确定正确的数据位宽度枚举值
+    // 🎯 确定数据位宽度
     i2s_data_bit_width_t bit_width = (bits_per_chan == 32) ? I2S_DATA_BIT_WIDTH_32BIT : I2S_DATA_BIT_WIDTH_16BIT;
 
     // 配置 I2S 标准模式，专门针对 INMP441 优化
@@ -148,33 +148,39 @@ static esp_err_t bsp_i2s_init(uint32_t sample_rate, int channel_format, int bits
 }
 
 /**
- * @brief 初始化开发板硬件
+ * @brief 🚀 初始化开发板硬件
  *
- * 这是硬件抽象层的主要初始化函数，设置 INMP441 麦克风
+ * 这是整个音频系统的“启动按钮”，它会：
+ * - 初始化INMP441麦克风
+ * - 设置好所有GPIO引脚
+ * - 准备好录音功能
  *
- * @param sample_rate 采样率 (Hz)，推荐 16000
+ * @param sample_rate 采样率（Hz），推荐16000
  * @param channel_format 声道格式，1=单声道
- * @param bits_per_chan 每个采样点的位数，推荐 16
+ * @param bits_per_chan 每个采样点的位数，推荐16
  * @return esp_err_t 初始化结果
  */
 esp_err_t bsp_board_init(uint32_t sample_rate, int channel_format, int bits_per_chan)
 {
-    ESP_LOGI(TAG, "正在初始化 ESP32-S3-DevKitC-1 配合 INMP441 麦克风");
-    ESP_LOGI(TAG, "音频参数: 采样率=%ld Hz, 声道数=%d, 位深=%d",
+    ESP_LOGI(TAG, "🚀 正在初始化ESP32-S3-DevKitC-1 + INMP441麦克风");
+    ESP_LOGI(TAG, "🎵 音频参数: 采样率=%ldHz, 声道数=%d, 位深=%d位",
              sample_rate, channel_format, bits_per_chan);
 
     return bsp_i2s_init(sample_rate, channel_format, bits_per_chan);
 }
 
 /**
- * @brief 从麦克风获取音频数据
+ * @brief 🎤 从麦克风获取音频数据
  *
- * 这个函数从 INMP441 麦克风读取音频数据，并进行必要的信号处理：
- * 1. 从 I2S 接口读取原始数据
- * 2. 对 INMP441 的输出进行格式转换和增益调整
- * 3. 确保数据适合后续的语音识别处理
+ * 这个函数就像“录音师”，它会：
+ * 
+ * 🎯 工作流程：
+ * 1. 从I2S接口读取原始数据
+ * 2. 对INMP441的输出进行格式转换
+ * 3. 可选择性应用增益调整
+ * 4. 确保数据适合语音识别
  *
- * @param is_get_raw_channel 是否获取原始通道数据（不进行处理）
+ * @param is_get_raw_channel 是否获取原始数据（true=不处理）
  * @param buffer 存储音频数据的缓冲区
  * @param buffer_len 缓冲区长度（字节）
  * @return esp_err_t 读取结果
@@ -184,29 +190,29 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
     esp_err_t ret = ESP_OK;
     size_t bytes_read = 0;
 
-    // 从 I2S 通道读取音频数据
+    // 🎤 从I2S通道读取音频数据
     ret = i2s_channel_read(rx_handle, buffer, buffer_len, &bytes_read, portMAX_DELAY);
 
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "读取 I2S 数据失败: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "❌ 读取I2S数据失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // 检查读取的数据长度是否符合预期
+    // 🔍 检查读取的数据长度是否符合预期
     if (bytes_read != buffer_len)
     {
-        ESP_LOGW(TAG, "预期读取 %d 字节，实际读取 %d 字节", buffer_len, bytes_read);
+        ESP_LOGW(TAG, "⚠️ 预期读取%d字节，实际读取%d字节", buffer_len, bytes_read);
     }
 
-    // INMP441 特定的数据处理
-    // INMP441 输出 24 位数据在 32 位帧中，左对齐
-    // 我们需要提取最高有效的 16 位用于 16 位音频处理
+    // 🎯 INMP441特定的数据处理
+    // INMP441输出24位数据在 32位帧中，左对齐
+    // 我们需要提取最高有效的16位用于语音识别
     if (!is_get_raw_channel)
     {
         int samples = buffer_len / sizeof(int16_t);
 
-        // 对 INMP441 的数据进行处理
+        // 🎶 对INMP441的数据进行处理
         // 麦克风输出左对齐数据，进行信号电平调整
         for (int i = 0; i < samples; i++)
         {
@@ -214,11 +220,11 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
             // 测试表明原始电平已足够满足唤醒词检测需求
             int32_t sample = static_cast<int32_t>(buffer[i]);
 
-            // 可选：应用 2 倍增益以提升信号强度（当前已禁用）
-            // 如果发现信号电平不足，可以取消下面这行的注释
+            // 🔊 可选：应用2倍增益以提升信号强度（当前已禁用）
+            // 如果发现声音太小，可以取消下面这行的注释
             // sample = sample * 2;
 
-            // 限制在 16 位有符号整数范围内
+            // 📦 限制在16位有符号整数范围内
             if (sample > 32767)
             {
                 sample = 32767;
@@ -236,7 +242,10 @@ esp_err_t bsp_get_feed_data(bool is_get_raw_channel, int16_t *buffer, int buffer
 }
 
 /**
- * @brief 获取音频输入通道数
+ * @brief 🎵 获取音频输入通道数
+ *
+ * 返回当前麦克风的声道数。
+ * 我们使用单声道，节省资源且足够语音识别使用。
  *
  * @return int 通道数（1=单声道）
  */
@@ -246,23 +255,26 @@ int bsp_get_feed_channel(void)
 }
 
 /**
- * @brief 初始化 I2S 输出接口用于 MAX98357A 功放
+ * @brief 🔊 初始化I2S输出接口用于MAX98357A功放
  *
- * MAX98357A 是一个数字音频功放，需要特定的 I2S 配置：
- * - 使用标准 I2S 协议 (Philips 格式)
- * - 单声道或立体声模式
- * - 16 位数据宽度
+ * 这个函数专门为MAX98357A功放配置I2S通信：
+ * 
+ * 🔧 I2S配置特点：
+ * - 使用Philips标准协议
+ * - 支持单声道/立体声
+ * - 16位数据宽度
+ * - 3W输出功率
  *
- * @param sample_rate 采样率 (Hz)
- * @param channel_format 声道数 (1=单声道, 2=立体声)
- * @param bits_per_chan 每个采样点的位数 (16 或 32)
+ * @param sample_rate 采样率（Hz）
+ * @param channel_format 声道数（1=单声道，2=立体声）
+ * @param bits_per_chan 每个采样点的位数（16或32）
  * @return esp_err_t 初始化结果
  */
 esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_chan)
 {
     esp_err_t ret = ESP_OK;
 
-    // 初始化MAX98357A的SD引脚（如果已连接）
+    // 🔌 初始化MAX98357A的SD引脚（控制功放开关）
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << I2S_OUT_SD_PIN),
         .mode = GPIO_MODE_OUTPUT,
@@ -272,22 +284,22 @@ esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_
     };
     gpio_config(&io_conf);
     gpio_set_level(I2S_OUT_SD_PIN, 1); // 高电平启用功放
-    ESP_LOGI(TAG, "MAX98357A SD引脚已初始化（GPIO%d）", I2S_OUT_SD_PIN);
+    ESP_LOGI(TAG, "✅ MAX98357A SD引脚已初始化（GPIO%d）", I2S_OUT_SD_PIN);
 
-    // 创建 I2S 发送通道配置
-    // 设置为主模式，ESP32-S3 作为时钟源
+    // 🔧 创建I2S发送通道配置
+    // ESP32作为主机（Master），提供时钟信号给功放
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT_TX, I2S_ROLE_MASTER);
     ret = i2s_new_channel(&chan_cfg, &tx_handle, nullptr);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "创建 I2S 发送通道失败: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "❌ 创建I2S发送通道失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // 确定正确的数据位宽度枚举值
+    // 🎯 确定数据位宽度
     i2s_data_bit_width_t bit_width = (bits_per_chan == 32) ? I2S_DATA_BIT_WIDTH_32BIT : I2S_DATA_BIT_WIDTH_16BIT;
 
-    // 配置 I2S 标准模式，专门针对 MAX98357A 优化
+    // 🎶 配置I2S标准模式（专门为MAX98357A优化）
     i2s_std_config_t std_cfg = {
         .clk_cfg = {
             .sample_rate_hz = sample_rate,
@@ -297,39 +309,39 @@ esp_err_t bsp_audio_init(uint32_t sample_rate, int channel_format, int bits_per_
         },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(bit_width, (channel_format == 1) ? I2S_SLOT_MODE_MONO : I2S_SLOT_MODE_STEREO),
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,  // MAX98357A 不需要主时钟
-            .bclk = I2S_OUT_BCLK_PIN, // 位时钟引脚
-            .ws = I2S_OUT_LRC_PIN,    // 字选择引脚
-            .dout = I2S_OUT_DIN_PIN,  // 数据输出引脚
-            .din = I2S_GPIO_UNUSED,   // 不需要数据输入（仅播放）
+            .mclk = I2S_GPIO_UNUSED,   // MCLK：MAX98357A不需要主时钟
+            .bclk = I2S_OUT_BCLK_PIN,  // BCLK：位时钟→ GPIO15
+            .ws = I2S_OUT_LRC_PIN,     // LRC：左右声道时钟→ GPIO16
+            .dout = I2S_OUT_DIN_PIN,   // DIN：数据输出→ GPIO7
+            .din = I2S_GPIO_UNUSED,    // DIN：不需要（只播放不录音）
             .invert_flags = {
-                .mclk_inv = false,
-                .bclk_inv = false,
-                .ws_inv = false,
+                .mclk_inv = false,     // 不反转主时钟
+                .bclk_inv = false,     // 不反转位时钟
+                .ws_inv = false,       // 不反转字选择
             },
         },
     };
 
-    // 初始化 I2S 标准模式
+    // 🚀 初始化I2S标准模式
     ret = i2s_channel_init_std_mode(tx_handle, &std_cfg);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "初始化 I2S 发送标准模式失败: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "❌ 初始化I2S发送标准模式失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // 启用 I2S 发送通道开始播放数据
+    // ▶️ 启用I2S发送通道开始播放数据
     ret = i2s_channel_enable(tx_handle);
     if (ret != ESP_OK)
     {
-        ESP_LOGE(TAG, "启用 I2S 发送通道失败: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "❌ 启用I2S发送通道失败: %s", esp_err_to_name(ret));
         return ret;
     }
 
-    // 设置通道状态标志
+    // 🟢 设置通道状态标志
     tx_channel_enabled = true;
 
-    ESP_LOGI(TAG, "I2S 音频播放初始化成功");
+    ESP_LOGI(TAG, "✅ I2S音频播放初始化成功");
     return ESP_OK;
 }
 
@@ -352,13 +364,13 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
 
     if (tx_handle == nullptr)
     {
-        ESP_LOGE(TAG, "I2S 发送通道未初始化");
+        ESP_LOGE(TAG, "❌ I2S发送通道未初始化");
         return ESP_ERR_INVALID_STATE;
     }
 
     if (audio_data == nullptr || data_len == 0)
     {
-        ESP_LOGE(TAG, "无效的音频数据");
+        ESP_LOGE(TAG, "❌ 无效的音频数据");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -368,16 +380,16 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
         // 先启用功放
         gpio_set_level(I2S_OUT_SD_PIN, 1); // 高电平启用功放
         vTaskDelay(pdMS_TO_TICKS(10)); // 等待功放启动
-        ESP_LOGD(TAG, "MAX98357A功放已启用");
+        ESP_LOGD(TAG, "✅ MAX98357A功放已启用");
         
         ret = i2s_channel_enable(tx_handle);
         if (ret != ESP_OK)
         {
-            ESP_LOGE(TAG, "启用 I2S 发送通道失败: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "❌ 启用I2S发送通道失败: %s", esp_err_to_name(ret));
             return ret;
         }
         tx_channel_enabled = true;
-        ESP_LOGD(TAG, "I2S 发送通道已重新启用");
+        ESP_LOGD(TAG, "✅ I2S发送通道已重新启用");
         
         // 发送一小段静音数据来初始化通道
         const size_t init_silence_size = 256; // 减小到256字节，避免大量内存分配
@@ -396,7 +408,7 @@ esp_err_t bsp_play_audio(const uint8_t *audio_data, size_t data_len)
 
         if (ret != ESP_OK)
         {
-            ESP_LOGE(TAG, "写入 I2S 音频数据失败: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "❌ 写入I2S音频数据失败: %s", esp_err_to_name(ret));
             break;
         }
 
@@ -445,13 +457,13 @@ esp_err_t bsp_play_audio_stream(const uint8_t *audio_data, size_t data_len)
 
     if (tx_handle == nullptr)
     {
-        ESP_LOGE(TAG, "I2S 发送通道未初始化");
+        ESP_LOGE(TAG, "❌ I2S发送通道未初始化");
         return ESP_ERR_INVALID_STATE;
     }
 
     if (audio_data == nullptr || data_len == 0)
     {
-        ESP_LOGE(TAG, "无效的音频数据");
+        ESP_LOGE(TAG, "❌ 无效的音频数据");
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -461,16 +473,16 @@ esp_err_t bsp_play_audio_stream(const uint8_t *audio_data, size_t data_len)
         // 先启用功放
         gpio_set_level(I2S_OUT_SD_PIN, 1); // 高电平启用功放
         vTaskDelay(pdMS_TO_TICKS(10)); // 等待功放启动
-        ESP_LOGD(TAG, "MAX98357A功放已启用");
+        ESP_LOGD(TAG, "✅ MAX98357A功放已启用");
         
         ret = i2s_channel_enable(tx_handle);
         if (ret != ESP_OK)
         {
-            ESP_LOGE(TAG, "启用 I2S 发送通道失败: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "❌ 启用I2S发送通道失败: %s", esp_err_to_name(ret));
             return ret;
         }
         tx_channel_enabled = true;
-        ESP_LOGD(TAG, "I2S 发送通道已重新启用");
+        ESP_LOGD(TAG, "✅ I2S发送通道已重新启用");
         
         // 发送一小段静音数据来初始化通道
         const size_t init_silence_size = 256; // 减小到256字节，避免大量内存分配
@@ -489,7 +501,7 @@ esp_err_t bsp_play_audio_stream(const uint8_t *audio_data, size_t data_len)
 
         if (ret != ESP_OK)
         {
-            ESP_LOGE(TAG, "写入 I2S 音频数据失败: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "❌ 写入I2S音频数据失败: %s", esp_err_to_name(ret));
             break;
         }
 
@@ -529,44 +541,44 @@ esp_err_t bsp_audio_stop(void)
 
     if (tx_handle == nullptr)
     {
-        ESP_LOGW(TAG, "I2S 发送通道未初始化，无需停止");
+        ESP_LOGW(TAG, "⚠️ I2S发送通道未初始化，无需停止");
         return ESP_OK;
     }
 
-    // 只有在通道启用时才禁用它
+    // 🟢 只有在通道启用时才禁用它
     if (tx_channel_enabled)
     {
-        // 发送一些静音数据来清空缓冲区
+        // 🔇 发送一些静音数据来清空缓冲区
         const size_t silence_size = 4096; // 4KB的静音数据
         uint8_t *silence_buffer = (uint8_t *)calloc(silence_size, 1);
         if (silence_buffer) {
             size_t bytes_written = 0;
             i2s_channel_write(tx_handle, silence_buffer, silence_size, &bytes_written, pdMS_TO_TICKS(100));
             free(silence_buffer);
-            ESP_LOGD(TAG, "已发送静音数据清空缓冲区");
+            ESP_LOGD(TAG, "✅ 已发送静音数据清空缓冲区");
         }
         
-        // 等待一小段时间让静音数据播放完
+        // ⏱️ 等待一小段时间让静音数据播放完
         vTaskDelay(pdMS_TO_TICKS(50));
         
-        // 先通过SD引脚关闭功放，防止噪音
+        // 🔌 先通过SD引脚关闭功放，防止噪音
         gpio_set_level(I2S_OUT_SD_PIN, 0); // 低电平关闭功放
-        ESP_LOGD(TAG, "MAX98357A功放已关闭");
+        ESP_LOGD(TAG, "✅ MAX98357A功放已关闭");
         vTaskDelay(pdMS_TO_TICKS(10)); // 等待功放完全关闭
         
-        // 禁用I2S发送通道
+        // 🛑️ 禁用I2S发送通道
         ret = i2s_channel_disable(tx_handle);
         if (ret != ESP_OK)
         {
-            ESP_LOGE(TAG, "禁用 I2S 发送通道失败: %s", esp_err_to_name(ret));
+            ESP_LOGE(TAG, "❌ 禁用I2S发送通道失败: %s", esp_err_to_name(ret));
             return ret;
         }
         tx_channel_enabled = false;
-        ESP_LOGI(TAG, "I2S 音频输出已停止");
+        ESP_LOGI(TAG, "✅ I2S音频输出已停止");
     }
     else
     {
-        ESP_LOGD(TAG, "I2S 发送通道已经是禁用状态");
+        ESP_LOGD(TAG, "ℹ️ I2S发送通道已经是禁用状态");
     }
 
     return ESP_OK;

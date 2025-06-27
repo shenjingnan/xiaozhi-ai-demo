@@ -1,29 +1,37 @@
 /**
  * @file main.cc
- * @brief ESP32-S3 智能语音助手 - 语音命令识别主程序
+ * @brief ESP32-S3 智能语音助手 - 支持大语言模型对话的语音助手主程序
  *
- * 本程序实现了完整的智能语音助手功能，包括：
- * 1. 语音唤醒检测 - 支持"你好小智"等多种唤醒词
- * 2. 命令词识别 - 支持"帮我开灯"、"帮我关灯"、"拜拜"等语音指令
- * 3. 音频反馈播放 - 通过MAX98357A功放播放确认音频
- * 4. LED灯控制 - 根据语音指令控制外接LED灯
+ * 🎯 功能特点：
+ * 1. 语音唤醒 - 支持"你好小智"唤醒词，随时待命
+ * 2. 连续对话 - 无需重复唤醒词，可以进行多轮对话
+ * 3. AI对话 - 接入大语言模型，理解自然语言并生成智能回复
+ * 4. 本地控制 - 内置"开灯"、"关灯"等命令词，快速响应
+ * 5. 实时传输 - 一边说话一边传输，降低响应延迟
  *
- * 硬件配置：
- * - ESP32-S3-DevKitC-1开发板（需要PSRAM版本）
- * - INMP441数字麦克风（音频输入）
- *   连接方式：VDD->3.3V, GND->GND, SD->GPIO6, WS->GPIO4, SCK->GPIO5
- * - MAX98357A数字功放（音频输出）
- *   连接方式：DIN->GPIO7, BCLK->GPIO15, LRC->GPIO16, VIN->3.3V, GND->GND
- * - 外接LED灯（GPIO21控制）
+ * 🔧 硬件配置（小智AI标准接线）：
+ * ┌─────────────────────────────────────────────────┐
+ * │ ESP32-S3 开发板 + 外围硬件                       │
+ * ├─────────────────────────────────────────────────┤
+ * │ • INMP441 数字麦克风（拾音）                     │
+ * │   └─ VDD→3.3V, GND→GND, SD→GPIO6              │
+ * │   └─ WS→GPIO4, SCK→GPIO5                      │
+ * │ • MAX98357A 数字功放（播音）                     │  
+ * │   └─ DIN→GPIO7, BCLK→GPIO15, LRC→GPIO16       │
+ * │   └─ VIN→3.3V, GND→GND                        │
+ * │ • LED 指示灯                                    │
+ * │   └─ 正极→GPIO21, 负极→GND（需要限流电阻）      │
+ * └─────────────────────────────────────────────────┘
  *
- * 音频参数：
- * - 采样率：16kHz
- * - 声道：单声道(Mono)
- * - 位深度：16位
+ * 📊 音频参数（语音识别标准配置）：
+ * - 采样率：16kHz（人声频率范围）
+ * - 声道数：1（单声道，节省内存）
+ * - 位深度：16位（CD音质）
  *
- * 使用的AI模型：
- * - 唤醒词检测：WakeNet9 "你好小智"模型
- * - 命令词识别：MultiNet7中文命令词识别模型
+ * 🤖 AI模型说明：
+ * - 唤醒词检测：WakeNet（"你好小智"）- 本地运行，低功耗
+ * - 命令词识别：MultiNet（中文命令）- 本地运行，快速响应
+ * - 对话理解：通过WebSocket连接云端大语言模型
  */
 
 extern "C"
@@ -64,41 +72,42 @@ extern "C"
 
 static const char *TAG = "语音识别"; // 日志标签
 
-// 外接LED GPIO定义
-#define LED_GPIO GPIO_NUM_21 // 外接LED灯珠连接到GPIO21
+// 🔌 硬件引脚定义
+#define LED_GPIO GPIO_NUM_21 // LED指示灯连接到GPIO21（记得加限流电阻哦）
 
-// WiFi配置
-#define WIFI_SSID "1804"
-#define WIFI_PASS "Sjn123123@"
+// 📡 网络配置（请根据您的实际情况修改）
+#define WIFI_SSID "1804"                 // 您的WiFi名称
+#define WIFI_PASS "Sjn123123@"           // 您的WiFi密码
 
-// WebSocket配置
+// 🌐 WebSocket服务器配置
 #define WS_URI "ws://192.168.1.174:8888" // 请改为您的电脑IP地址:8888
 
 // WiFi和WebSocket管理器
 static WiFiManager* wifi_manager = nullptr;
 static WebSocketClient* websocket_client = nullptr;
 
-// 系统状态定义
+// 🎮 系统状态机（程序的不同工作阶段）
 typedef enum
 {
-    STATE_WAITING_WAKEUP = 0,   // 等待唤醒词
-    STATE_RECORDING = 1,        // 录音中
-    STATE_WAITING_RESPONSE = 2, // 等待Python响应
-    STATE_WAITING_COMMAND = 3,  // 等待命令词
+    STATE_WAITING_WAKEUP = 0,   // 休眠状态：等待用户说"你好小智"
+    STATE_RECORDING = 1,        // 录音状态：正在录制用户说话
+    STATE_WAITING_RESPONSE = 2, // 等待状态：等待服务器返回AI响应
+    STATE_WAITING_COMMAND = 3,  // 命令状态：等待用户说出控制命令（已弃用）
 } system_state_t;
 
-// 命令词ID定义（对应commands_cn.txt中的ID）
-#define COMMAND_TURN_OFF_LIGHT 308 // "帮我关灯"
-#define COMMAND_TURN_ON_LIGHT 309  // "帮我开灯"
-#define COMMAND_BYE_BYE 314        // "拜拜"
-#define COMMAND_CUSTOM 315         // "自定义命令词"
+// 🎤 本地命令词ID（快速响应，无需联网）
+// 这些ID来自ESP-SR语音识别框架的预定义命令词表
+#define COMMAND_TURN_OFF_LIGHT 308 // "帮我关灯" - 关闭LED
+#define COMMAND_TURN_ON_LIGHT 309  // "帮我开灯" - 点亮LED
+#define COMMAND_BYE_BYE 314        // "拜拜" - 退出对话
+#define COMMAND_CUSTOM 315         // "现在安全屋情况如何" - 演示用
 
-// 命令词配置结构体
+// 📝 命令词配置结构（告诉系统要识别哪些命令）
 typedef struct
 {
-    int command_id;
-    const char *pinyin;
-    const char *description;
+    int command_id;              // 命令的唯一标识符
+    const char *pinyin;          // 命令的拼音（用于语音识别匹配）
+    const char *description;     // 命令的中文描述（方便理解）
 } command_config_t;
 
 // 自定义命令词列表
@@ -136,14 +145,20 @@ static bool vad_speech_detected = false;
 static int vad_silence_frames = 0;
 static const int VAD_SILENCE_FRAMES_REQUIRED = 20; // VAD检测到静音的帧数阈值（约600ms）
 
-// 连续对话相关变量
-static bool is_continuous_conversation = false;  // 是否处于连续对话模式
-static TickType_t recording_timeout_start = 0;  // 录音超时计时开始时间
-#define RECORDING_TIMEOUT_MS 10000  // 录音超时时间（10秒）
-static bool user_started_speaking = false;  // 标记用户是否已经开始说话
+// 💬 连续对话功能相关变量
+// 连续对话模式：第一次对话后，不需要再说唤醒词就能继续对话
+static bool is_continuous_conversation = false;  // 是否在连续对话中
+static TickType_t recording_timeout_start = 0;  // 开始计时的时间点
+#define RECORDING_TIMEOUT_MS 10000              // 等待说话超时（10秒没说话就退出）
+static bool user_started_speaking = false;      // 用户是否已经开始说话
 
 /**
- * @brief WebSocket事件处理回调
+ * @brief WebSocket事件处理函数
+ * 
+ * 当WebSocket连接发生各种事件时（连接成功、收到数据、断开等），
+ * 这个函数会被自动调用来处理这些事件。
+ * 
+ * @param event 事件数据，包含事件类型和相关数据
  */
 static void on_websocket_event(const WebSocketClient::EventData& event)
 {
@@ -217,9 +232,12 @@ static void on_websocket_event(const WebSocketClient::EventData& event)
 }
 
 /**
- * @brief 初始化外接LED GPIO
+ * @brief 初始化LED指示灯
  *
- * 配置GPIO21为输出模式，用于控制外接LED灯珠
+ * 💡 这个函数会把GPIO21设置为输出模式，用来控制LED灯的亮灭。
+ * 初始状态为关闭（低电平）。
+ * 
+ * 注意：LED需要串联一个限流电阻（如220Ω）以保护LED和GPIO。
  */
 static void init_led(void)
 {
@@ -262,15 +280,19 @@ static void led_turn_off(void)
 static bool is_realtime_streaming = false;
 
 /**
- * @brief 配置自定义命令词
+ * @brief 配置本地命令词识别
  *
- * 该函数会清除现有命令词，然后添加自定义命令词列表中的所有命令
+ * 🎆 这个函数会告诉语音识别系统要识别哪些中文命令。
+ * 这些命令在本地运行，不需要联网，响应速度快。
+ * 
+ * 工作流程：
+ * 1. 清空旧的命令词列表
+ * 2. 添加我们定义的新命令词（如“帮我开灯”）
+ * 3. 更新到识别模型中
  *
- * @param multinet 命令词识别接口指针
- * @param mn_model_data 命令词模型数据指针
- * @return esp_err_t
- *         - ESP_OK: 配置成功
- *         - ESP_FAIL: 配置失败
+ * @param multinet 语音识别的接口对象
+ * @param mn_model_data 识别模型的数据
+ * @return ESP_OK=成功，ESP_FAIL=失败
  */
 static esp_err_t configure_custom_commands(esp_mn_iface_t *multinet, model_iface_data_t *mn_model_data)
 {
@@ -349,10 +371,13 @@ static esp_err_t configure_custom_commands(esp_mn_iface_t *multinet, model_iface
 }
 
 /**
- * @brief 获取命令词的中文描述
+ * @brief 根据命令ID获取中文说明
  *
- * @param command_id 命令ID
- * @return const char* 命令的中文描述，如果未找到返回"未知命令"
+ * 🔍 这是一个工具函数，用来查找命令ID对应的中文说明。
+ * 比如：309 -> "帮我开灯"
+ * 
+ * @param command_id 命令的数字ID
+ * @return 命令的中文说明文字
  */
 static const char *get_command_description(int command_id)
 {
@@ -367,12 +392,15 @@ static const char *get_command_description(int command_id)
 }
 
 /**
- * @brief 播放音频的包装函数
+ * @brief 播放音频文件
  *
- * @param audio_data 音频数据
- * @param data_len 数据长度
- * @param description 音频描述（用于日志）
- * @return esp_err_t 播放结果
+ * 🔊 这个函数会通过扬声器播放指定的音频数据。
+ * 使用AudioManager管理音频播放，确保不会与其他音频冲突。
+ * 
+ * @param audio_data 要播放的音频数据（PCM格式）
+ * @param data_len 音频数据的字节数
+ * @param description 音频的描述（如"欢迎音频"）
+ * @return ESP_OK=播放成功
  */
 static esp_err_t play_audio_with_stop(const uint8_t *audio_data, size_t data_len, const char *description)
 {
@@ -383,9 +411,15 @@ static esp_err_t play_audio_with_stop(const uint8_t *audio_data, size_t data_len
 }
 
 /**
- * @brief 执行退出逻辑
+ * @brief 退出对话模式
  *
- * 播放再见音频并返回等待唤醒状态
+ * 👋 当用户说“拜拜”或对话超时后，调用这个函数结束对话。
+ * 
+ * 执行步骤：
+ * 1. 播放“再见”的音频
+ * 2. 断开WebSocket连接
+ * 3. 清理所有状态
+ * 4. 回到等待唤醒词的初始状态
  */
 static void execute_exit_logic(void)
 {
@@ -414,49 +448,57 @@ static void execute_exit_logic(void)
 }
 
 /**
- * @brief 应用程序主入口函数
+ * @brief 🉰️ 程序主入口（这里是一切的开始）
  *
- * 初始化INMP441麦克风硬件，加载唤醒词检测模型，
- * 然后进入主循环进行实时音频采集和唤醒词检测。
+ * ESP32启动后会自动调用这个函数。
+ * 
+ * 主要工作流程：
+ * 1. 初始化各种硬件（LED、麦克风、扬声器）
+ * 2. 连接WiFi和WebSocket服务器
+ * 3. 加载语音识别模型
+ * 4. 进入主循环，开始监听用户说话
  */
 extern "C" void app_main(void)
 {
-    // ========== 第一步：初始化NVS ==========
+    // ① 初始化NVS（非易失性存储）
+    // NVS用于保存WiFi配置等信息，即使断电也不会丢失
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
+        // 如果NVS区域满了或版本不匹配，就清空重来
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
 
-    // ========== 第二步：初始化外接LED ==========
+    // ② 初始化LED灯（用于状态指示）
     init_led();
 
-    // ========== 第三步：初始化WiFi ==========
+    // ③ 连接WiFi网络
     ESP_LOGI(TAG, "正在连接WiFi...");
     wifi_manager = new WiFiManager(WIFI_SSID, WIFI_PASS);
     if (wifi_manager->connect() != ESP_OK) {
         ESP_LOGE(TAG, "WiFi连接失败");
+        ESP_LOGE(TAG, "请检查：1) WiFi名称和密码是否正确 2) 路由器是否开启");
         delete wifi_manager;
         return;
     }
     
-    // ========== 第四步：初始化WebSocket连接 ==========
-    // 在WiFi连接成功后立即连接WebSocket
-    ESP_LOGI(TAG, "正在初始化WebSocket连接...");
+    // ④ 连接WebSocket服务器（用于与电脑通信）
+    ESP_LOGI(TAG, "正在连接WebSocket服务器...");
     websocket_client = new WebSocketClient(WS_URI, true, 5000);
-    websocket_client->setEventCallback(on_websocket_event);
+    websocket_client->setEventCallback(on_websocket_event);  // 设置事件处理函数
     if (websocket_client->connect() != ESP_OK) {
         ESP_LOGE(TAG, "WebSocket连接失败");
+        ESP_LOGE(TAG, "请检查：1) 电脑上的server.py是否在运行 2) IP地址是否正确");
         delete websocket_client;
         delete wifi_manager;
         return;
     }
 
-    // ========== 第四步：初始化INMP441麦克风硬件 ==========
+    // ⑤ 初始化麦克风（INMP441数字麦克风）
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
-    ESP_LOGI(TAG, "音频参数: 采样率16kHz, 单声道, 16位深度");
+    ESP_LOGI(TAG, "音频参数: 16kHz采样率, 单声道, 16位");
 
     ret = bsp_board_init(16000, 1, 16); // 16kHz, 单声道, 16位
     if (ret != ESP_OK)
@@ -467,9 +509,9 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ INMP441麦克风初始化成功");
 
-    // ========== 第三步：初始化音频播放功能 ==========
+    // ⑥ 初始化扬声器（MAX98357A数字功放）
     ESP_LOGI(TAG, "正在初始化音频播放功能...");
-    ESP_LOGI(TAG, "音频播放参数: 采样率16kHz, 单声道, 16位深度");
+    ESP_LOGI(TAG, "音频播放参数: 16kHz采样率, 单声道, 16位");
 
     ret = bsp_audio_init(16000, 1, 16); // 16kHz, 单声道, 16位
     if (ret != ESP_OK)
@@ -480,7 +522,8 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 音频播放初始化成功");
 
-    // ========== 第四步：初始化VAD（语音活动检测）==========
+    // ⑦ 初始化VAD（语音活动检测）
+    // VAD用于检测用户什么时候开始说话、什么时候停止
     ESP_LOGI(TAG, "正在初始化语音活动检测（VAD）...");
     
     // 创建VAD实例，使用更精确的参数控制
@@ -499,8 +542,8 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "  - 最小语音时长: 200 ms");
     ESP_LOGI(TAG, "  - 最小静音时长: 1000 ms");
 
-    // ========== 第五步：初始化语音识别模型 ==========
-    ESP_LOGI(TAG, "正在初始化唤醒词检测模型...");
+    // ⑧ 加载唤醒词检测模型（识别“你好小智”）
+    ESP_LOGI(TAG, "正在加载唤醒词检测模型...");
 
     // 检查内存状态
     size_t free_heap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
@@ -580,8 +623,8 @@ extern "C" void app_main(void)
         return;
     }
 
-    // ========== 第五步：初始化命令词识别模型 ==========
-    ESP_LOGI(TAG, "正在初始化命令词识别模型...");
+    // ⑨ 加载命令词识别模型（识别“开灯”、“关灯”等）
+    ESP_LOGI(TAG, "正在加载命令词识别模型...");
 
     // 获取中文命令词识别模型（MultiNet7）
     char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_CHINESE);
@@ -620,7 +663,7 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 命令词配置完成");
 
-    // ========== 初始化噪音抑制 ==========
+    // ⑩ 初始化噪音抑制（可选，提高噪音环境下的识别率）
     ESP_LOGI(TAG, "正在初始化噪音抑制模块...");
     
     // 获取噪音抑制模型
@@ -647,8 +690,8 @@ extern "C" void app_main(void)
         }
     }
 
-    // ========== 第六步：准备音频缓冲区 ==========
-    // 获取模型要求的音频数据块大小（样本数 × 每样本字节数）
+    // ⑪ 准备音频缓冲区
+    // 获取语音识别模型需要的数据块大小
     int audio_chunksize = wakenet->get_samp_chunksize(model_data) * sizeof(int16_t);
 
     // 分配音频数据缓冲区内存
@@ -688,13 +731,13 @@ extern "C" void app_main(void)
     ESP_LOGI(TAG, "正在启动智能语音助手...");
     ESP_LOGI(TAG, "请对着麦克风说出唤醒词 '你好小智'");
 
-    // ========== 第七步：主循环 - 实时音频采集与语音识别 ==========
-    ESP_LOGI(TAG, "系统启动完成，等待唤醒词 '你好小智'...");
+    // 🎮 主循环 - 开始实时语音识别
+    ESP_LOGI(TAG, "系统启动完成，请对着麦克风说 '你好小智'...");
 
     while (1)
     {
-        // 从INMP441麦克风获取一帧音频数据
-        // false参数表示获取处理后的音频数据（非原始通道数据）
+        // 🎧 从麦克风读取一小段音频数据
+        // 这里的false表示要处理后的数据（不要原始数据）
         esp_err_t ret = bsp_get_feed_data(false, buffer, audio_chunksize);
         if (ret != ESP_OK)
         {
@@ -730,7 +773,7 @@ extern "C" void app_main(void)
 
         if (current_state == STATE_WAITING_WAKEUP)
         {
-            // 第一阶段：唤醒词检测
+            // 🛌 休眠状态：监听唤醒词“你好小智”
             wakenet_state_t wn_state = wakenet->detect(model_data, processed_audio);
 
             if (wn_state == WAKENET_DETECTED)
@@ -738,17 +781,18 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "🎉 检测到唤醒词 '你好小智'！");
                 printf("=== 唤醒词检测成功！模型: %s ===\n", model_name);
 
-                // WebSocket应该已经连接，如果没有连接则尝试重新启动
+                // 检查WebSocket连接状态
                 if (websocket_client != nullptr && !websocket_client->isConnected())
                 {
-                    ESP_LOGI(TAG, "WebSocket未连接，尝试重新连接...");
+                    ESP_LOGI(TAG, "WebSocket未连接，正在重连...");
                     websocket_client->connect();
-                    vTaskDelay(pdMS_TO_TICKS(500));  // 等待连接
+                    vTaskDelay(pdMS_TO_TICKS(500));  // 等待500ms
                 }
 
-                // 通过WebSocket发送唤醒词检测事件
+                // 通知服务器：唤醒成功
                 if (websocket_client != nullptr && websocket_client->isConnected())
                 {
+                    // 构造JSON消息
                     char wake_msg[256];
                     snprintf(wake_msg, sizeof(wake_msg),
                              "{\"event\":\"wake_word_detected\",\"model\":\"%s\",\"timestamp\":%lld}",
@@ -757,7 +801,7 @@ extern "C" void app_main(void)
                     websocket_client->sendText(wake_msg);
                 }
 
-                // 播放欢迎音频
+                // 🎵 播放“叮咚”提示音，表示准备好了
                 ESP_LOGI(TAG, "播放欢迎音频...");
                 play_audio_with_stop(hi, hi_len, "欢迎音频");
 
@@ -769,41 +813,44 @@ extern "C" void app_main(void)
                     ESP_LOGI(TAG, "发送录音开始事件");
                 }
 
-                // 切换到录音状态
+                // 🎙️ 进入录音状态
                 current_state = STATE_RECORDING;
                 audio_manager->startRecording();
-                vad_speech_detected = false;
-                vad_silence_frames = 0;
-                is_continuous_conversation = false;  // 第一次录音，不是连续对话
-                user_started_speaking = false;
-                recording_timeout_start = 0;  // 第一次录音不需要超时
-                is_realtime_streaming = false;  // 等待用户开始说话才开启流式传输
-                // 重置VAD触发器状态
-                vad_reset_trigger(vad_inst);
-                // 重置命令词识别缓冲区
-                multinet->clean(mn_model_data);
+                
+                // 初始化各种状态变量
+                vad_speech_detected = false;        // 还没检测到说话
+                vad_silence_frames = 0;             // 静音帧计数器清零
+                is_continuous_conversation = false;  // 第一次对话，不是连续模式
+                user_started_speaking = false;      // 用户还没开始说话
+                recording_timeout_start = 0;        // 第一次不设超时
+                is_realtime_streaming = false;      // 等用户说话后再开始传输
+                
+                // 重置各种检测器
+                vad_reset_trigger(vad_inst);        // 重置VAD
+                multinet->clean(mn_model_data);     // 清空命令词缓冲区
+                
                 ESP_LOGI(TAG, "开始录音，请说话...");
             }
         }
         else if (current_state == STATE_RECORDING)
         {
-            // 录音阶段：录制用户说话内容
+            // 🎙️ 录音状态：记录用户说的话
             if (audio_manager->isRecording() && !audio_manager->isRecordingBufferFull())
             {
                 // 将音频数据存入录音缓冲区
                 int samples = audio_chunksize / sizeof(int16_t);
                 audio_manager->addRecordingData(processed_audio, samples);
                 
-                // 实时流式发送音频数据到服务器
+                // 📤 实时传输音频到服务器（边说边传，降低延迟）
                 if (is_realtime_streaming && websocket_client != nullptr && websocket_client->isConnected())
                 {
-                    // 直接发送当前音频块
+                    // 立即发送当前这段音频
                     size_t bytes_to_send = samples * sizeof(int16_t);
                     websocket_client->sendBinary((const uint8_t*)processed_audio, bytes_to_send);
-                    ESP_LOGD(TAG, "实时发送音频块: %zu 字节", bytes_to_send);
+                    ESP_LOGD(TAG, "实时发送: %zu 字节", bytes_to_send);
                 }
                 
-                // 如果是连续对话模式，同时进行命令词检测
+                // 🎯 连续对话模式下，同时检测本地命令词（如“开灯”、“拜拜”）
                 if (is_continuous_conversation)
                 {
                     esp_mn_state_t mn_state = multinet->detect(mn_model_data, processed_audio);
@@ -887,23 +934,24 @@ extern "C" void app_main(void)
                     }
                 }
                 
-                // 使用VAD检测语音活动（使用30ms帧长度）
+                // 👂 使用VAD检测用户是否在说话
+                // VAD会分析音频，判断是语音还是静音
                 vad_state_t vad_state = vad_process(vad_inst, processed_audio, SAMPLE_RATE, 30);
                 
-                // 根据VAD状态处理
+                // 如果VAD检测到有人说话
                 if (vad_state == VAD_SPEECH) {
                     vad_speech_detected = true;
                     vad_silence_frames = 0;
                     user_started_speaking = true;  // 标记用户已经开始说话
                     recording_timeout_start = 0;  // 用户说话后取消超时
                     
-                    // 只有在用户开始说话后才开启实时流式传输
+                    // 🚀 用户开始说话了，启动实时传输
                     if (!is_realtime_streaming) {
                         is_realtime_streaming = true;
                         if (is_continuous_conversation) {
-                            ESP_LOGI(TAG, "连续对话模式：检测到用户开始说话，开启实时流式传输");
+                            ESP_LOGI(TAG, "连续对话：检测到说话，开始实时传输...");
                         } else {
-                            ESP_LOGI(TAG, "首次对话：检测到用户开始说话，开启实时流式传输");
+                            ESP_LOGI(TAG, "首次对话：检测到说话，开始实时传输...");
                         }
                     }
                     
@@ -915,10 +963,11 @@ extern "C" void app_main(void)
                         last_log_time = current_time;
                     }
                 } else if (vad_state == VAD_SILENCE && vad_speech_detected) {
-                    // 检测到静音，但必须先检测到过语音
+                    // 🤐 检测到静音（但之前已经有说话）
                     vad_silence_frames++;
+                    
+                    // 如果静音超过600ms，认为用户说完了
                     if (vad_silence_frames >= VAD_SILENCE_FRAMES_REQUIRED) {
-                        // VAD检测到持续静音，认为用户说完了
                         ESP_LOGI(TAG, "VAD检测到用户说话结束，录音长度: %.2f 秒",
                                  audio_manager->getRecordingDuration());
                         audio_manager->stopRecording();
@@ -970,7 +1019,7 @@ extern "C" void app_main(void)
             }
             else if (audio_manager->isRecordingBufferFull())
             {
-                // 录音缓冲区满了，强制停止录音
+                // ⚠️ 录音时间太长，缓冲区满了（10秒上限）
                 ESP_LOGW(TAG, "录音缓冲区已满，停止录音");
                 audio_manager->stopRecording();
                 is_realtime_streaming = false;  // 停止实时流式传输
@@ -989,13 +1038,13 @@ extern "C" void app_main(void)
                 ESP_LOGI(TAG, "等待服务器响应音频...");
             }
             
-            // 检查连续对话模式下的超时
+            // ⏱️ 连续对话模式下，检查是否超时没说话
             if (is_continuous_conversation && recording_timeout_start > 0 && !user_started_speaking)
             {
                 TickType_t current_time = xTaskGetTickCount();
                 if ((current_time - recording_timeout_start) > pdMS_TO_TICKS(RECORDING_TIMEOUT_MS))
                 {
-                    ESP_LOGW(TAG, "⏰ 连续对话录音超时，用户未说话");
+                    ESP_LOGW(TAG, "⏰ 超过10秒没说话，退出对话");
                     audio_manager->stopRecording();
                     execute_exit_logic();
                 }
@@ -1014,14 +1063,14 @@ extern "C" void app_main(void)
         }
         else if (current_state == STATE_WAITING_RESPONSE)
         {
-            // 等待响应状态：服务器正在处理并发送响应
+            // ⏳ 等待状态：等待服务器的AI回复
             
-            // 响应音频的播放在WebSocket事件处理器中完成
-            // 检查是否已经播放完成
+            // 音频会通过WebSocket流式接收并播放
+            // 这里只需要检查播放是否完成
             if (audio_manager->isResponsePlayed())
             {
-                // 响应已播放完成，重新进入录音状态（连续对话）
-                // 发送开始录音事件
+                // 🔁 AI回复完毕，进入连续对话模式
+                // 通知服务器准备接收下一轮对话
                 if (websocket_client != nullptr && websocket_client->isConnected())
                 {
                     const char* start_msg = "{\"event\":\"recording_started\"}";
@@ -1042,13 +1091,13 @@ extern "C" void app_main(void)
                 vad_reset_trigger(vad_inst);
                 // 重置命令词识别缓冲区
                 multinet->clean(mn_model_data);
-                ESP_LOGI(TAG, "进入连续对话模式，请继续说话（%d秒内）...", RECORDING_TIMEOUT_MS / 1000);
-                ESP_LOGI(TAG, "您可以：1) 继续对话 2) 说出命令词 3) 说'拜拜'退出");
+                ESP_LOGI(TAG, "进入连续对话模式，请在%d秒内继续说话...", RECORDING_TIMEOUT_MS / 1000);
+                ESP_LOGI(TAG, "💡 提示：1) 可以继续提问 2) 说“帮我开/关灯” 3) 说“拜拜”结束");
             }
         }
         else if (current_state == STATE_WAITING_COMMAND)
         {
-            // 第二阶段：命令词识别
+            // 🎯 命令模式：等待本地命令词（目前已弃用）
             esp_mn_state_t mn_state = multinet->detect(mn_model_data, processed_audio);
 
             if (mn_state == ESP_MN_STATE_DETECTED)
@@ -1127,9 +1176,8 @@ extern "C" void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 
-    // ========== 资源清理 ==========
-    // 注意：由于主循环是无限循环，以下代码正常情况下不会执行
-    // 仅在程序异常退出时进行资源清理
+    // 🧹 资源清理（正常情况下不会执行到这里）
+    // 因为上面是无限循环，只有出错时才会走到这里
     ESP_LOGI(TAG, "正在清理系统资源...");
 
     // 销毁噪音抑制实例
