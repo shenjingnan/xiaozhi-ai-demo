@@ -14,6 +14,7 @@ import websockets
 from datetime import datetime
 from pydub import AudioSegment
 import time
+import socket
 
 # 尝试导入服务器版本的客户端，如果没有则使用原版
 try:
@@ -59,11 +60,20 @@ class WebSocketAudioServer:
         os.makedirs(self.response_dir, exist_ok=True)
 
         # 初始化Omni Realtime客户端
+        # 优先从环境变量获取 API 密钥
         self.api_key = os.environ.get("DASHSCOPE_API_KEY")
+        
+        # 如果环境变量没有设置，可以在这里硬编码（不推荐在生产环境使用）
+        # 警告：请勿将 API 密钥提交到版本控制系统
+        # self.api_key = "your-api-key-here"  # 请替换为您的实际 API 密钥
+        
         if not self.api_key or not OMNI_CLIENT_AVAILABLE:
             if not self.api_key:
                 print(
-                    "⚠️  警告: 未设置DASHSCOPE_API_KEY环境变量，将使用默认light_on音频"
+                    "⚠️  警告: 未设置DASHSCOPE_API_KEY环境变量\n"
+                    "   请通过以下方式之一配置API密钥：\n"
+                    "   1. 设置环境变量: export DASHSCOPE_API_KEY='your-api-key'\n"
+                    "   2. 在代码中硬编码（仅限开发环境）"
                 )
             self.use_model = False
         else:
@@ -560,17 +570,62 @@ class WebSocketAudioServer:
 
             return bytes(result)
 
+    def get_local_ips(self):
+        """获取本机所有可用的IP地址"""
+        ips = []
+        try:
+            # 获取主机名
+            hostname = socket.gethostname()
+            
+            # 获取所有网络接口的IP地址
+            for info in socket.getaddrinfo(hostname, None):
+                # 只获取IPv4地址
+                if info[0] == socket.AF_INET:
+                    ip = info[4][0]
+                    if ip not in ips and not ip.startswith('127.'):
+                        ips.append(ip)
+            
+            # 如果上面的方法没有获取到IP，尝试另一种方法
+            if not ips:
+                # 创建一个UDP socket来获取本机IP
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                try:
+                    # 连接到一个外部地址（不会真正发送数据）
+                    s.connect(('8.8.8.8', 80))
+                    ip = s.getsockname()[0]
+                    if ip not in ips and not ip.startswith('127.'):
+                        ips.append(ip)
+                except:
+                    pass
+                finally:
+                    s.close()
+            
+            # 始终添加localhost
+            ips.append('127.0.0.1')
+            
+        except Exception as e:
+            print(f"⚠️  获取本机IP地址失败: {e}")
+            ips = ['127.0.0.1']
+        
+        return ips
+
     async def start_server(self):
         """启动WebSocket服务器"""
         print("=" * 60)
         print("ESP32音频WebSocket服务器")
         print("=" * 60)
-        print(f"监听地址: ws://{WS_HOST}:{WS_PORT}")
+        
+        # 获取所有可用的IP地址
+        local_ips = self.get_local_ips()
+        print("可用的连接地址:")
+        for ip in local_ips:
+            print(f"  - ws://{ip}:{WS_PORT}")
+        
         if self.use_model:
-            print(f"响应模式: AI大模型生成响应")
+            print(f"\n响应模式: AI大模型生成响应")
             print(f"模型: qwen-omni-turbo-realtime")
         else:
-            print(f"响应模式: 未启用（需要设置 DASHSCOPE_API_KEY）")
+            print(f"\n响应模式: 未启用（需要设置 DASHSCOPE_API_KEY）")
             print(f"提示: 设置环境变量 DASHSCOPE_API_KEY 以启用AI响应")
         print("=" * 60)
         print("\n等待ESP32连接...\n")
