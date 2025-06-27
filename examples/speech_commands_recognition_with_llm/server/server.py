@@ -14,7 +14,6 @@ import websockets
 from datetime import datetime
 from pydub import AudioSegment
 import time
-from send_custom_audio import get_custom_audio
 
 # 尝试导入服务器版本的客户端，如果没有则使用原版
 try:
@@ -71,11 +70,6 @@ class WebSocketAudioServer:
             self.use_model = True
             print("✅ 已配置大模型API，将使用AI生成响应音频")
 
-        # 无论是否使用模型，都加载默认音频作为备用
-        self.response_audio = get_custom_audio("light_on")
-        print(
-            f"✅ 已加载备用响应音频: {len(self.response_audio)} 字节 (约{len(self.response_audio)/2/SAMPLE_RATE:.1f}秒)"
-        )
 
     async def handle_client(self, websocket, path):
         """处理客户端连接"""
@@ -188,21 +182,18 @@ class WebSocketAudioServer:
                                         print(f"✅ [{client_ip}] 响应音频发送完成，总计: {client_state['audio_tracker']['total_sent']} 字节")
                                         break
                                 
-                                # 如果没有收到任何音频响应，使用默认音频
+                                # 如果没有收到任何音频响应，只打印警告
                                 if client_state['audio_tracker']['total_sent'] == 0:
-                                    print(f"⚠️ [{client_ip}] 未收到大模型响应，使用默认音频")
-                                    await self.send_response_audio_stream(websocket, client_ip)
+                                    print(f"⚠️ [{client_ip}] 未收到大模型响应")
                                 
                                 # 发送ping作为音频结束标志
                                 await websocket.ping()
                                 
                             except Exception as e:
                                 print(f"❌ [{client_ip}] 模型处理失败: {e}")
-                                # 失败时使用默认音频
-                                await self.send_response_audio(websocket, client_ip)
                         else:
-                            # 不使用模型，发送默认音频
-                            await self.send_response_audio(websocket, client_ip)
+                            # 不使用模型时只打印警告
+                            print(f"⚠️ [{client_ip}] 未启用AI模型，无法生成响应")
                     
                     elif event == "recording_cancelled":
                         print(f"⚠️ [{client_ip}] 录音取消")
@@ -300,7 +291,7 @@ class WebSocketAudioServer:
             if self.use_model:
                 await self.send_model_response_audio(websocket, client_ip, bytes(audio_buffer))
             else:
-                await self.send_response_audio(websocket, client_ip)
+                print(f"⚠️ [{client_ip}] 未启用AI模型，无法生成响应")
         else:
             print(f"⚠️ [{client_ip}] 没有接收到音频数据")
     
@@ -399,61 +390,14 @@ class WebSocketAudioServer:
             if total_audio_sent > 0:
                 print(f"✅ [{client_ip}] 流式音频发送完成，总计: {total_audio_sent} 字节 ({total_audio_sent/2/SAMPLE_RATE:.2f}秒)")
             else:
-                print(f"⚠️  [{client_ip}] 未收到大模型响应，使用默认音频")
-                await self.send_response_audio_stream(websocket, client_ip)
+                print(f"⚠️  [{client_ip}] 未收到大模型响应")
 
         except Exception as e:
             print(f"❌ [{client_ip}] 大模型处理失败: {e}")
             import traceback
 
             traceback.print_exc()
-            # 失败时使用默认音频
-            await self.send_response_audio(websocket, client_ip)
 
-    async def send_response_audio(self, websocket, client_ip):
-        """发送默认响应音频到ESP32（保持原有的一次性发送方式）"""
-        print(f"📤 [{client_ip}] 发送默认响应音频...")
-
-        try:
-            # 直接发送二进制PCM数据
-            print(f"   音频数据长度: {len(self.response_audio)} 字节")
-            print(f"   音频时长: {len(self.response_audio) / 2 / SAMPLE_RATE:.2f} 秒")
-
-            # 一次性发送所有二进制数据
-            await websocket.send(self.response_audio)
-
-            # 发送一个ping包作为音频结束标志
-            await websocket.ping()
-
-            print(f"✅ [{client_ip}] 响应音频发送完成")
-
-        except Exception as e:
-            print(f"❌ [{client_ip}] 发送音频失败: {e}")
-    
-    async def send_response_audio_stream(self, websocket, client_ip):
-        """流式发送默认响应音频到ESP32"""
-        print(f"📤 [{client_ip}] 流式发送默认响应音频...")
-
-        try:
-            # 分块发送音频数据
-            CHUNK_SIZE = 3200  # 每200ms的音频数据（16kHz * 2字节 * 0.2秒）
-            total_sent = 0
-            
-            for i in range(0, len(self.response_audio), CHUNK_SIZE):
-                chunk = self.response_audio[i:i + CHUNK_SIZE]
-                await websocket.send(chunk)
-                total_sent += len(chunk)
-                print(f"   → 发送音频块: {len(chunk)} 字节")
-                # 小延迟模拟流式效果
-                await asyncio.sleep(0.05)
-
-            # 发送一个ping包作为音频结束标志
-            await websocket.ping()
-
-            print(f"✅ [{client_ip}] 流式音频发送完成，总计: {total_sent} 字节")
-
-        except Exception as e:
-            print(f"❌ [{client_ip}] 流式发送失败: {e}")
 
     async def save_audio(self, audio_buffer, timestamp):
         """保存音频数据为MP3文件"""
@@ -626,7 +570,7 @@ class WebSocketAudioServer:
             print(f"响应模式: AI大模型生成响应")
             print(f"模型: qwen-omni-turbo-realtime")
         else:
-            print(f"响应模式: 默认音频 (light_on.h)")
+            print(f"响应模式: 未启用（需要设置 DASHSCOPE_API_KEY）")
             print(f"提示: 设置环境变量 DASHSCOPE_API_KEY 以启用AI响应")
         print("=" * 60)
         print("\n等待ESP32连接...\n")
