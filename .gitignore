@@ -5,3 +5,6 @@ sdkconfig
 sdkconfig.old
 .DS_Store
 __pycache__
+user_records
+response_records
+CLAUDE.md
