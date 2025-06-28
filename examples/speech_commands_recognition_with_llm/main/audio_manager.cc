@@ -28,11 +28,6 @@ AudioManager::AudioManager(uint32_t sample_rate, uint32_t recording_duration_sec
     , response_buffer_size(0)
     , response_length(0)
     , response_played(false)
-    , ws_audio_buffer(nullptr)
-    , ws_audio_buffer_size(0)
-    , ws_audio_buffer_len(0)
-    , receiving_audio(false)
-    , last_audio_time(0)
     , is_streaming(false)
     , streaming_buffer(nullptr)
     , streaming_buffer_size(STREAMING_BUFFER_SIZE)
@@ -98,10 +93,6 @@ void AudioManager::deinit() {
         response_buffer = nullptr;
     }
     
-    if (ws_audio_buffer != nullptr) {
-        free(ws_audio_buffer);
-        ws_audio_buffer = nullptr;
-    }
     
     if (streaming_buffer != nullptr) {
         free(streaming_buffer);
@@ -224,102 +215,6 @@ esp_err_t AudioManager::playAudio(const uint8_t* audio_data, size_t data_len, co
     return ret;
 }
 
-// 🌐 ========== 网络音频处理（旧版本，现已弃用） ==========
-
-bool AudioManager::processWebSocketData(uint8_t op_code, const uint8_t* data, size_t data_len, bool is_waiting_response) {
-    // 检查是否是完整的数据包
-    if (op_code == 0x08 && data_len == 2) {
-        // WebSocket关闭帧
-        ESP_LOGI(TAG, "收到WebSocket关闭帧");
-        return false;
-    }
-    
-    // 二进制数据处理 (op_code == 0x02 表示二进制帧)
-    if (op_code == 0x02 && data_len > 0) {
-        // 如果这是第一个二进制数据包
-        if (!receiving_audio) {
-            ESP_LOGI(TAG, "开始接收二进制音频数据");
-            receiving_audio = true;
-            
-            // 分配缓冲区
-            if (ws_audio_buffer) {
-                free(ws_audio_buffer);
-            }
-            ws_audio_buffer_size = MAX_WS_AUDIO_SIZE;
-            ws_audio_buffer = (uint8_t*)calloc(ws_audio_buffer_size, 1);
-            if (!ws_audio_buffer) {
-                ESP_LOGE(TAG, "无法分配音频缓冲区");
-                receiving_audio = false;
-                return false;
-            }
-            ws_audio_buffer_len = 0;
-        }
-        
-        // 累积音频数据
-        if (ws_audio_buffer && (ws_audio_buffer_len + data_len) <= ws_audio_buffer_size) {
-            memcpy(ws_audio_buffer + ws_audio_buffer_len, data, data_len);
-            ws_audio_buffer_len += data_len;
-            last_audio_time = xTaskGetTickCount();
-            
-            // 每累积10KB显示一次进度
-            if (ws_audio_buffer_len % 10240 < data_len) {
-                ESP_LOGI(TAG, "累积音频数据: %zu KB", ws_audio_buffer_len / 1024);
-            }
-        }
-        return false;  // 还在接收中
-    }
-    // 检测音频传输结束（收到ping包）
-    else if (op_code == 0x09) { // ping帧
-        ESP_LOGI(TAG, "收到ping包，检查是否有待播放的音频");
-        
-        if (receiving_audio && ws_audio_buffer && ws_audio_buffer_len > 0) {
-            ESP_LOGI(TAG, "音频数据接收完成，总大小: %zu 字节 (%.2f 秒)",
-                     ws_audio_buffer_len, (float)ws_audio_buffer_len / 2 / sample_rate);
-            receiving_audio = false;
-            
-            // 播放累积的音频数据
-            if (is_waiting_response) {
-                addResponseData(ws_audio_buffer, ws_audio_buffer_len);
-                finishResponseAndPlay();
-            }
-            
-            // 清理缓冲区
-            free(ws_audio_buffer);
-            ws_audio_buffer = nullptr;
-            ws_audio_buffer_size = 0;
-            ws_audio_buffer_len = 0;
-            
-            return true;  // 音频处理完成
-        }
-    }
-    // 超时检测（如果500ms没有新数据，认为传输结束）
-    else if (receiving_audio && last_audio_time > 0 &&
-             (xTaskGetTickCount() - last_audio_time) > pdMS_TO_TICKS(500)) {
-        ESP_LOGI(TAG, "音频数据接收超时，准备播放");
-        receiving_audio = false;
-        
-        // 播放累积的音频数据
-        if (ws_audio_buffer && ws_audio_buffer_len > 0 && is_waiting_response) {
-            ESP_LOGI(TAG, "音频数据接收完成（超时），总大小: %zu 字节 (%.2f 秒)",
-                     ws_audio_buffer_len, (float)ws_audio_buffer_len / 2 / sample_rate);
-            addResponseData(ws_audio_buffer, ws_audio_buffer_len);
-            finishResponseAndPlay();
-        }
-        
-        // 清理缓冲区
-        if (ws_audio_buffer) {
-            free(ws_audio_buffer);
-            ws_audio_buffer = nullptr;
-            ws_audio_buffer_size = 0;
-            ws_audio_buffer_len = 0;
-        }
-        last_audio_time = 0;
-        
-        return true;  // 音频处理完成
-    }
-    
-    return false;  // 还在处理中
-}
 
 // 🌊 ========== 流式播放功能实现 ==========
 

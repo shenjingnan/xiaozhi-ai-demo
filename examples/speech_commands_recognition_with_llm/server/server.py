@@ -69,7 +69,7 @@ import time
 import socket
 
 # 尝试导入服务器版本的客户端，如果没有则使用原版
-from examples.speech_commands_recognition_with_llm.server.omni_realtime_client import (
+from omni_realtime_client import (
     OmniRealtimeClient,
     TurnDetectionMode,
 )
@@ -138,7 +138,9 @@ class WebSocketAudioServer:
         # ⚠️ 注意事项：
         # 如果环境变量没有设置，可以在这里硬编码（不推荐在生产环境使用）
         # 警告：请勿将 API 密钥提交到版本控制系统（如Git）
-        # self.api_key = "your-api-key-here"  # 请替换为您的实际 API 密钥
+        self.api_key = (
+            "sk-9356d79dc97e44e2afbc5c31bd79a9a1"  # 请替换为您的实际 API 密钥
+        )
 
         # 💡 新手提示：
         # 在终端设置环境变量：export DASHSCOPE_API_KEY='sk-xxxxx'
@@ -420,172 +422,6 @@ class WebSocketAudioServer:
 
         except Exception as e:
             print(f"❌ [{client_ip}] 发送音频块失败: {e}")
-
-    async def process_streaming_audio(self, websocket, client_ip):
-        """处理流式音频数据"""
-        print(f"🎤 [{client_ip}] 开始接收流式音频数据...")
-
-        # 音频数据缓冲区
-        audio_buffer = bytearray()
-
-        # 等待音频数据
-        while True:
-            try:
-                # 接收数据（设置超时）
-                message = await asyncio.wait_for(websocket.recv(), timeout=5.0)
-
-                if isinstance(message, bytes):
-                    # 二进制音频数据
-                    audio_buffer.extend(message)
-                    print(
-                        f"   收到音频块: {len(message)} 字节, 总计: {len(audio_buffer)} 字节"
-                    )
-
-                    # 检查是否已经收到足够的数据（例如超过1秒）
-                    if len(audio_buffer) >= SAMPLE_RATE * 2:  # 1秒的音频数据
-                        # 可以开始处理了
-                        break
-                else:
-                    # 非二进制消息，可能是控制消息
-                    break
-
-            except asyncio.TimeoutError:
-                # 超时，认为音频接收完成
-                print(f"⏰ [{client_ip}] 音频接收超时，准备处理")
-                break
-            except Exception as e:
-                print(f"❌ [{client_ip}] 接收音频数据失败: {e}")
-                break
-
-        if len(audio_buffer) > 0:
-            print(
-                f"✅ [{client_ip}] 音频接收完成，总大小: {len(audio_buffer)} 字节 ({len(audio_buffer)/2/SAMPLE_RATE:.2f}秒)"
-            )
-
-            # 保存音频
-            current_timestamp = datetime.now()
-            saved_file = await self.save_audio([bytes(audio_buffer)], current_timestamp)
-            if saved_file:
-                print(f"✅ [{client_ip}] 音频已保存: {saved_file}")
-
-            # 等待一下再发送响应
-            print(f"⏳ [{client_ip}] 等待0.5秒后发送响应音频...")
-            await asyncio.sleep(0.5)
-
-            # 发送响应音频
-            if self.use_model:
-                await self.send_model_response_audio(
-                    websocket, client_ip, bytes(audio_buffer)
-                )
-            else:
-                print(f"⚠️ [{client_ip}] 未启用AI模型，无法生成响应")
-        else:
-            print(f"⚠️ [{client_ip}] 没有接收到音频数据")
-
-    async def send_model_response_audio(self, websocket, client_ip, user_audio_data):
-        """使用大模型生成并发送响应音频（流式）"""
-        print(f"🤖 [{client_ip}] 使用大模型生成响应音频（流式）...")
-
-        try:
-            total_audio_sent = 0
-            stream_complete = False
-            last_sent_time = time.time()
-
-            # 定义流式音频处理函数
-            async def on_audio_delta(audio_data):
-                """直接处理并发送音频片段到ESP32"""
-                nonlocal total_audio_sent, last_sent_time
-                try:
-                    # 直接重采样并发送音频数据
-                    # audio_data 是 24kHz 的音频数据，需要转换为 16kHz
-                    resampled = self.resample_audio(
-                        audio_data, MODEL_SAMPLE_RATE, SAMPLE_RATE
-                    )
-
-                    # 立即发送到ESP32
-                    await websocket.send(resampled)
-                    total_audio_sent += len(resampled)
-                    last_sent_time = time.time()  # 更新最后发送时间
-                    print(f"   → 流式发送音频块: {len(resampled)} 字节")
-
-                except Exception as e:
-                    print(f"❌ [{client_ip}] 发送音频块失败: {e}")
-
-            # 创建大模型客户端（参考qwen_demo.py的实现）
-            realtime_client = OmniRealtimeClient(
-                base_url="wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
-                api_key=self.api_key,
-                model="qwen-omni-turbo-realtime-2025-05-08",
-                voice="Chelsie",
-                on_audio_delta=lambda audio: asyncio.create_task(on_audio_delta(audio)),
-                turn_detection_mode=TurnDetectionMode.MANUAL,  # 使用手动模式，因为我们需要控制何时生成响应
-            )
-
-            # 连接到大模型
-            await realtime_client.connect()
-
-            # 启动消息处理
-            message_task = asyncio.create_task(realtime_client.handle_messages())
-
-            # 发送用户音频数据
-            print(f"   发送用户音频到大模型: {len(user_audio_data)} 字节")
-
-            # 将音频数据分块发送（参考main.py的实现）
-            chunk_size = 3200  # 每个块200ms的音频数据（16kHz * 2字节 * 0.2秒）
-            for i in range(0, len(user_audio_data), chunk_size):
-                chunk = user_audio_data[i : i + chunk_size]
-                # Base64编码音频数据
-                encoded_data = base64.b64encode(chunk).decode("utf-8")
-
-                # 构建事件（参考main.py的格式）
-                event = {
-                    "event_id": "event_" + str(int(time.time() * 1000)),
-                    "type": "input_audio_buffer.append",
-                    "audio": encoded_data,
-                }
-                await realtime_client.send_event(event)
-
-                # 小延迟避免过快发送
-                await asyncio.sleep(0.01)
-
-            # 手动触发响应生成
-            await realtime_client.create_response()
-
-            # 等待响应生成和发送完成
-            max_wait_time = 30  # 最多等待30秒
-            start_time = time.time()
-
-            while time.time() - start_time < max_wait_time:
-                await asyncio.sleep(0.1)
-
-                # 如果超过1秒没有新的音频数据发送，认为流结束
-                if total_audio_sent > 0 and time.time() - last_sent_time > 1.0:
-                    stream_complete = True
-                    break
-
-            # 发送ping作为音频结束标志
-            await websocket.ping()
-
-            # 取消消息任务并关闭连接
-            try:
-                message_task.cancel()
-                await message_task
-            except asyncio.CancelledError:
-                pass
-            await realtime_client.close()
-
-            if total_audio_sent > 0:
-                print(
-                    f"✅ [{client_ip}] 流式音频发送完成，总计: {total_audio_sent} 字节 ({total_audio_sent/2/SAMPLE_RATE:.2f}秒)"
-                )
-            else:
-                print(f"⚠️  [{client_ip}] 未收到大模型响应")
-
-        except Exception as e:
-            print(f"❌ [{client_ip}] 大模型处理失败: {e}")
-            import traceback
-
-            traceback.print_exc()
 
     async def save_audio(self, audio_buffer, timestamp):
         """

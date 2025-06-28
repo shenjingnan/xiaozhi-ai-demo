@@ -62,7 +62,6 @@ extern "C"
 #include "mock_voices/bye.h"     // 再见音频数据文件
 #include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
-#include "driver/uart.h"            // UART驱动
 #include "nvs_flash.h"              // NVS存储
 }
 
@@ -76,11 +75,11 @@ static const char *TAG = "语音识别"; // 日志标签
 #define LED_GPIO GPIO_NUM_21 // LED指示灯连接到GPIO21（记得加限流电阻哦）
 
 // 📡 网络配置（请根据您的实际情况修改）
-#define WIFI_SSID "<你的WIFI名称>"                 // 您的WiFi名称
-#define WIFI_PASS "<你的WIFI密码>"           // 您的WiFi密码
+#define WIFI_SSID "1804"                 // 您的WiFi名称
+#define WIFI_PASS "Sjn123123@"           // 您的WiFi密码
 
 // 🌐 WebSocket服务器配置
-#define WS_URI "ws://<你的电脑IP地址>:8888" // 请改为您的电脑IP地址:8888
+#define WS_URI "ws://192.168.1.174:8888" // 请改为您的电脑IP地址:8888
 
 // WiFi和WebSocket管理器
 static WiFiManager* wifi_manager = nullptr;
@@ -92,7 +91,6 @@ typedef enum
     STATE_WAITING_WAKEUP = 0,   // 休眠状态：等待用户说"你好小智"
     STATE_RECORDING = 1,        // 录音状态：正在录制用户说话
     STATE_WAITING_RESPONSE = 2, // 等待状态：等待服务器返回AI响应
-    STATE_WAITING_COMMAND = 3,  // 命令状态：等待用户说出控制命令（已弃用）
 } system_state_t;
 
 // 🎤 本地命令词ID（快速响应，无需联网）
@@ -716,9 +714,6 @@ extern "C" void app_main(void)
     }
     ESP_LOGI(TAG, "✓ 音频管理器初始化成功");
 
-    // 创建串口输入处理任务
-    // 不再需要串口输入任务，改用WebSocket
-    // xTaskCreate(uart_input_task, "uart_input", 4096, NULL, 5, NULL);
     ESP_LOGI(TAG, "✓ 使用WebSocket进行通信");
 
     // 显示系统配置信息
@@ -1093,82 +1088,6 @@ extern "C" void app_main(void)
                 multinet->clean(mn_model_data);
                 ESP_LOGI(TAG, "进入连续对话模式，请在%d秒内继续说话...", RECORDING_TIMEOUT_MS / 1000);
                 ESP_LOGI(TAG, "💡 提示：1) 可以继续提问 2) 说“帮我开/关灯” 3) 说“拜拜”结束");
-            }
-        }
-        else if (current_state == STATE_WAITING_COMMAND)
-        {
-            // 🎯 命令模式：等待本地命令词（目前已弃用）
-            esp_mn_state_t mn_state = multinet->detect(mn_model_data, processed_audio);
-
-            if (mn_state == ESP_MN_STATE_DETECTED)
-            {
-                // 获取识别结果
-                esp_mn_results_t *mn_result = multinet->get_results(mn_model_data);
-                if (mn_result->num > 0)
-                {
-                    int command_id = mn_result->command_id[0];
-                    float prob = mn_result->prob[0];
-
-                    const char *cmd_desc = get_command_description(command_id);
-                    ESP_LOGI(TAG, "🎯 检测到命令词: ID=%d, 置信度=%.2f, 内容=%s, 命令='%s'",
-                             command_id, prob, mn_result->string, cmd_desc);
-
-                    // 处理具体命令
-                    if (command_id == COMMAND_TURN_ON_LIGHT)
-                    {
-                        ESP_LOGI(TAG, "💡 执行开灯命令");
-                        led_turn_on();
-
-                        // 播放开灯确认音频
-                        play_audio_with_stop(ok, ok_len, "开灯确认音频");
-                    }
-                    else if (command_id == COMMAND_TURN_OFF_LIGHT)
-                    {
-                        ESP_LOGI(TAG, "💡 执行关灯命令");
-                        led_turn_off();
-
-                        // 播放关灯确认音频
-                        play_audio_with_stop(ok, ok_len, "关灯确认音频");
-                    }
-                    else if (command_id == COMMAND_CUSTOM)
-                    {
-                        ESP_LOGI(TAG, "💡 执行自定义命令词");
-
-                        // 播放自定义确认音频
-                        play_audio_with_stop(custom, custom_len, "自定义确认音频");
-                    }
-                    else if (command_id == COMMAND_BYE_BYE)
-                    {
-                        ESP_LOGI(TAG, "👋 检测到拜拜命令，立即退出");
-                        execute_exit_logic();
-                        continue; // 跳过后续的超时重置逻辑，直接进入下一次循环
-                    }
-                    else
-                    {
-                        ESP_LOGW(TAG, "⚠️  未知命令ID: %d", command_id);
-                    }
-                }
-
-                // 命令处理完成，重新开始5秒倒计时，继续等待下一个命令
-                command_timeout_start = xTaskGetTickCount();
-                multinet->clean(mn_model_data); // 清理命令词识别缓冲区
-                ESP_LOGI(TAG, "命令执行完成，重新开始5秒倒计时");
-                ESP_LOGI(TAG, "可以继续说出指令: '帮我开灯'、'帮我关灯' 或 '拜拜'");
-            }
-            else if (mn_state == ESP_MN_STATE_TIMEOUT)
-            {
-                ESP_LOGW(TAG, "⏰ 命令词识别超时");
-                execute_exit_logic();
-            }
-            else
-            {
-                // 检查手动超时
-                TickType_t current_time = xTaskGetTickCount();
-                if ((current_time - command_timeout_start) > pdMS_TO_TICKS(COMMAND_TIMEOUT_MS))
-                {
-                    ESP_LOGW(TAG, "⏰ 命令词等待超时 (%lu秒)", (unsigned long)(COMMAND_TIMEOUT_MS / 1000));
-                    execute_exit_logic();
-                }
             }
         }
 

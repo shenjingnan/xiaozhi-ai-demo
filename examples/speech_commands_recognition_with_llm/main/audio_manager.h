@@ -206,18 +206,6 @@ public:
      */
     void resetResponsePlayedFlag() { response_played = false; }
 
-    // 🌐 ========== 网络音频处理（已弃用） ==========
-
-    /**
-     * @brief 处理WebSocket接收到的音频数据
-     * 
-     * @param op_code WebSocket操作码
-     * @param data 数据指针
-     * @param data_len 数据长度
-     * @param is_waiting_response 是否正在等待响应
-     * @return true 音频处理完成，false 还在接收中
-     */
-    bool processWebSocketData(uint8_t op_code, const uint8_t* data, size_t data_len, bool is_waiting_response);
 
     // 🔧 ========== 工具函数 ==========
 
@@ -260,13 +248,6 @@ private:
     size_t response_length;             // 已接收的样本数
     bool response_played;               // 是否已播放完成
 
-    // WebSocket音频接收相关
-    uint8_t* ws_audio_buffer;
-    size_t ws_audio_buffer_size;
-    size_t ws_audio_buffer_len;
-    bool receiving_audio;
-    TickType_t last_audio_time;
-    static const size_t MAX_WS_AUDIO_SIZE = 1024 * 1024; // 1MB
     
     // 🌊 流式播放相关变量
     bool is_streaming;                  // 是否在流式播放中
