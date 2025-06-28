@@ -75,11 +75,11 @@ static const char *TAG = "语音识别"; // 日志标签
 #define LED_GPIO GPIO_NUM_21 // LED指示灯连接到GPIO21（记得加限流电阻哦）
 
 // 📡 网络配置（请根据您的实际情况修改）
-#define WIFI_SSID "1804"                 // 您的WiFi名称
-#define WIFI_PASS "Sjn123123@"           // 您的WiFi密码
+#define WIFI_SSID "<你的WIFI名称>"                 // 您的WiFi名称
+#define WIFI_PASS "<你的WIFI密码>"           // 您的WiFi密码
 
 // 🌐 WebSocket服务器配置
-#define WS_URI "ws://192.168.1.174:8888" // 请改为您的电脑IP地址:8888
+#define WS_URI "ws://<你的电脑IP地址>:8888" // 请改为您的电脑IP地址:8888
 
 // WiFi和WebSocket管理器
 static WiFiManager* wifi_manager = nullptr;

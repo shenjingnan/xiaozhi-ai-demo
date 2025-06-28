@@ -138,9 +138,7 @@ class WebSocketAudioServer:
         # ⚠️ 注意事项：
         # 如果环境变量没有设置，可以在这里硬编码（不推荐在生产环境使用）
         # 警告：请勿将 API 密钥提交到版本控制系统（如Git）
-        self.api_key = (
-            "sk-9356d79dc97e44e2afbc5c31bd79a9a1"  # 请替换为您的实际 API 密钥
-        )
+        # self.api_key = "your-api-key-here"  # 请替换为您的实际 API 密钥
 
         # 💡 新手提示：
         # 在终端设置环境变量：export DASHSCOPE_API_KEY='sk-xxxxx'
