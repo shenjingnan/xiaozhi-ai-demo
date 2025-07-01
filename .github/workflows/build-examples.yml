@@ -1,0 +1,32 @@
+name: Build ESP-IDF Examples
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'examples/**'
+      - '.github/workflows/build-examples.yml'
+  workflow_dispatch:  # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        example: 
+          - wake_word_detection
+          - speech_commands_recognition
+          - speech_commands_recognition_with_llm
+    
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+    
+    - name: esp-idf build ${{ matrix.example }}
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.4
+        target: esp32s3
+        path: 'examples/${{ matrix.example }}'
