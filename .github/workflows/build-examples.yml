@@ -11,15 +11,22 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    strategy:
+      matrix:
+        example: 
+          - wake_word_detection
+          - speech_commands_recognition
+          - speech_commands_recognition_with_llm
+    
     steps:
     - name: Checkout repo
       uses: actions/checkout@v4
       with:
         submodules: 'recursive'
-    - name: esp-idf build
+    
+    - name: esp-idf build ${{ matrix.example }}
       uses: espressif/esp-idf-ci-action@v1
       with:
         esp_idf_version: v5.4
         target: esp32s3
-        path: 'examples/wake_word_detection'
+        path: 'examples/${{ matrix.example }}'
