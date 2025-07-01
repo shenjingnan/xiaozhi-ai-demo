@@ -20,12 +20,22 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
       
-    - name: Pull ESP-IDF Docker image
+    - name: Pull ESP-IDF Docker image (Linux/Windows)
+      if: runner.os != 'macOS'
       run: docker pull espressif/idf:release-v5.4
+      
+    - name: Setup ESP-IDF (macOS)
+      if: runner.os == 'macOS'
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.4
+        target: esp32s3
         
-    - name: Build examples (Linux/macOS)
-      if: runner.os != 'Windows'
+    - name: Build examples (Linux)
+      if: runner.os == 'Linux'
       shell: bash
       run: |
         # 设置错误时退出
@@ -58,6 +68,66 @@ jobs:
             -e HOME=/tmp \
             espressif/idf:release-v5.4 \
             idf.py build; then
+            echo "✅ $example built successfully!"
+            successful_builds="$successful_builds\n- ✅ $example"
+          else
+            echo "❌ $example build failed!"
+            failed_builds="$failed_builds\n- ❌ $example"
+          fi
+          
+          # 返回根目录
+          cd - > /dev/null
+          echo ""
+        done
+        
+        # 生成构建摘要
+        echo "## Build Summary for ${{ matrix.os }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ -n "$successful_builds" ]; then
+          echo "### ✅ Successful Builds:" >> $GITHUB_STEP_SUMMARY
+          echo -e "$successful_builds" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ -n "$failed_builds" ]; then
+          echo "### ❌ Failed Builds:" >> $GITHUB_STEP_SUMMARY
+          echo -e "$failed_builds" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+        
+    - name: Build examples (macOS)
+      if: runner.os == 'macOS'
+      shell: bash
+      run: |
+        # 设置错误时退出
+        set -e
+        
+        # 获取所有示例目录，排除 control-led
+        examples=$(find examples -maxdepth 1 -type d -name "*" | grep -v "^examples$" | grep -v "control-led" | sort)
+        
+        # 构建结果跟踪
+        failed_builds=""
+        successful_builds=""
+        
+        # 构建每个示例
+        for example in $examples; do
+          echo "=========================================="
+          echo "Building $example"
+          echo "=========================================="
+          
+          # 进入示例目录
+          cd "$example"
+          
+          # 清理之前的构建
+          rm -rf build sdkconfig || true
+          
+          # 设置IDF环境变量
+          . $IDF_PATH/export.sh
+          
+          # 执行构建
+          if idf.py build; then
             echo "✅ $example built successfully!"
             successful_builds="$successful_builds\n- ✅ $example"
           else
