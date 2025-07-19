@@ -46,7 +46,7 @@ public:
     // 舵机PWM脉宽定义（微秒）
     static constexpr int SERVO_MIN_PULSE_WIDTH = 500;     // 0度对应的脉宽（0.5ms）
     static constexpr int SERVO_MAX_PULSE_WIDTH = 2500;    // 180度对应的脉宽（2.5ms）
-    static constexpr int SERVO_CENTER_PULSE_WIDTH = 1250; // 90度对应的脉宽（1.25ms）
+    static constexpr int SERVO_CENTER_PULSE_WIDTH = 1250; // 45度对应的脉宽（1.25ms）
 
     // 角度范围常量
     static constexpr int MIN_ANGLE = 0;     // 最小角度
