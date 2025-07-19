@@ -614,17 +614,6 @@ extern "C" void app_main(void)
                             ESP_LOGI(TAG, "✓ 舵机旋转确认音频播放成功");
                         }
                     }
-                    else if (command_id == COMMAND_CUSTOM)
-                    {
-                        ESP_LOGI(TAG, "💡 执行自定义命令词");
-
-                        // 播放自定义确认音频
-                        esp_err_t audio_ret = bsp_play_audio(custom, custom_len);
-                        if (audio_ret == ESP_OK)
-                        {
-                            ESP_LOGI(TAG, "✓ 自定义确认音频播放成功");
-                        }
-                    }
                     else if (command_id == COMMAND_BYE_BYE)
                     {
                         ESP_LOGI(TAG, "👋 检测到拜拜命令，立即退出");
