@@ -6,7 +6,7 @@
  * 1. 语音唤醒检测 - 支持"你好小智"等多种唤醒词
  * 2. 命令词识别 - 支持"帮我开灯"、"帮我关灯"、"拜拜"等语音指令
  * 3. 音频反馈播放 - 通过MAX98357A功放播放确认音频
- * 4. 舵机控制 - 根据语音指令控制SG90舵机旋转
+ * 4. 舵机控制 - 根据语音指令控制舵机旋转
  *
  * 硬件配置：
  * - ESP32-S3-DevKitC-1开发板（需要PSRAM版本）
@@ -14,7 +14,7 @@
  *   连接方式：VDD->3.3V, GND->GND, SD->GPIO6, WS->GPIO4, SCK->GPIO5
  * - MAX98357A数字功放（音频输出）
  *   连接方式：DIN->GPIO7, BCLK->GPIO15, LRC->GPIO16, VIN->3.3V, GND->GND
- * - SG90舵机（GPIO18控制）
+ * - 舵机（GPIO18控制）
  *   连接方式：红线->5V/3.3V, 棕线->GND, 橙线->GPIO18
  *
  * 音频参数：
@@ -53,14 +53,14 @@ extern "C"
 static const char *TAG = "舵机控制"; // 日志标签
 
 // 舵机控制GPIO和PWM定义
-#define SERVO_GPIO GPIO_NUM_18                 // SG90舵机PWM信号连接到GPIO18
+#define SERVO_GPIO GPIO_NUM_18                 // 舵机PWM信号连接到GPIO18
 #define SERVO_LEDC_TIMER LEDC_TIMER_0          // 使用LEDC定时器0
 #define SERVO_LEDC_CHANNEL LEDC_CHANNEL_0      // 使用LEDC通道0
 #define SERVO_LEDC_MODE LEDC_LOW_SPEED_MODE    // 低速模式
-#define SERVO_PWM_FREQ 50                      // SG90舵机PWM频率50Hz
+#define SERVO_PWM_FREQ 50                      // 舵机PWM频率50Hz
 #define SERVO_PWM_RESOLUTION LEDC_TIMER_13_BIT // 13位分辨率（8192级别）
 
-// SG90舵机PWM脉宽定义（微秒）
+// 舵机PWM脉宽定义（微秒）
 #define SERVO_MIN_PULSE_WIDTH 500     // 0度对应的脉宽（0.5ms）
 #define SERVO_MAX_PULSE_WIDTH 2500    // 180度对应的脉宽（2.5ms）
 #define SERVO_CENTER_PULSE_WIDTH 1500 // 45度对应的脉宽（1.5ms）
@@ -108,14 +108,14 @@ static int current_servo_angle = 45; // 当前舵机角度，初始为45度（�
 static void servo_set_angle(int angle);
 
 /**
- * @brief 初始化SG90舵机PWM控制
+ * @brief 初始化舵机PWM控制
  *
- * 配置GPIO18为PWM输出模式，用于控制SG90舵机
+ * 配置GPIO18为PWM输出模式，用于控制舵机
  * PWM频率：50Hz，脉宽范围：0.5ms-2.5ms对应0-180度
  */
 static void init_servo(void)
 {
-    ESP_LOGI(TAG, "正在初始化SG90舵机 (GPIO18)...");
+    ESP_LOGI(TAG, "正在初始化舵机 (GPIO18)...");
 
     // 配置LEDC定时器
     ledc_timer_config_t ledc_timer = {
@@ -153,7 +153,7 @@ static void init_servo(void)
     // 设置舵机到中位（90度）
     current_servo_angle = 90;
     servo_set_angle(current_servo_angle);
-    ESP_LOGI(TAG, "✓ SG90舵机初始化成功，初始位置：90度（中位）");
+    ESP_LOGI(TAG, "✓ 舵机初始化成功，初始位置：90度（中位）");
 }
 
 /**
@@ -355,7 +355,7 @@ static void execute_exit_logic(void)
  */
 extern "C" void app_main(void)
 {
-    // ========== 第一步：初始化SG90舵机 ==========
+    // ========== 第一步：初始化舵机 ==========
     init_servo();
 
     // ========== 第二步：初始化INMP441麦克风硬件 ==========
