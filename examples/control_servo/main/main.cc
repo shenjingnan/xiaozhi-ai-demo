@@ -53,17 +53,17 @@ extern "C"
 static const char *TAG = "舵机控制"; // 日志标签
 
 // 舵机控制GPIO和PWM定义
-#define SERVO_GPIO GPIO_NUM_18 // SG90舵机PWM信号连接到GPIO18
-#define SERVO_LEDC_TIMER LEDC_TIMER_0 // 使用LEDC定时器0
-#define SERVO_LEDC_CHANNEL LEDC_CHANNEL_0 // 使用LEDC通道0
-#define SERVO_LEDC_MODE LEDC_LOW_SPEED_MODE // 低速模式
-#define SERVO_PWM_FREQ 50 // SG90舵机PWM频率50Hz
+#define SERVO_GPIO GPIO_NUM_18                 // SG90舵机PWM信号连接到GPIO18
+#define SERVO_LEDC_TIMER LEDC_TIMER_0          // 使用LEDC定时器0
+#define SERVO_LEDC_CHANNEL LEDC_CHANNEL_0      // 使用LEDC通道0
+#define SERVO_LEDC_MODE LEDC_LOW_SPEED_MODE    // 低速模式
+#define SERVO_PWM_FREQ 50                      // SG90舵机PWM频率50Hz
 #define SERVO_PWM_RESOLUTION LEDC_TIMER_13_BIT // 13位分辨率（8192级别）
 
 // SG90舵机PWM脉宽定义（微秒）
-#define SERVO_MIN_PULSE_WIDTH 500  // 0度对应的脉宽（0.5ms）
-#define SERVO_MAX_PULSE_WIDTH 2500 // 180度对应的脉宽（2.5ms）
-#define SERVO_CENTER_PULSE_WIDTH 1500 // 90度对应的脉宽（1.5ms）
+#define SERVO_MIN_PULSE_WIDTH 500     // 0度对应的脉宽（0.5ms）
+#define SERVO_MAX_PULSE_WIDTH 2500    // 180度对应的脉宽（2.5ms）
+#define SERVO_CENTER_PULSE_WIDTH 1500 // 45度对应的脉宽（1.5ms）
 
 // 系统状态定义
 typedef enum
@@ -102,7 +102,7 @@ static TickType_t command_timeout_start = 0;
 static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 
 // 舵机状态变量
-static int current_servo_angle = 90; // 当前舵机角度，初始为90度（中位）
+static int current_servo_angle = 45; // 当前舵机角度，初始为45度（中位）
 
 // 函数声明
 static void servo_set_angle(int angle);
@@ -124,8 +124,7 @@ static void init_servo(void)
         .timer_num = SERVO_LEDC_TIMER,
         .freq_hz = SERVO_PWM_FREQ,
         .clk_cfg = LEDC_AUTO_CLK,
-        .deconfigure = false
-    };
+        .deconfigure = false};
     esp_err_t ret = ledc_timer_config(&ledc_timer);
     if (ret != ESP_OK)
     {
@@ -143,8 +142,7 @@ static void init_servo(void)
         .duty = 0, // 初始占空比为0
         .hpoint = 0,
         .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD, // 默认模式：无输出时不关闭电源域
-        .flags = {0}
-    };
+        .flags = {0}};
     ret = ledc_channel_config(&ledc_channel);
     if (ret != ESP_OK)
     {
@@ -166,12 +164,14 @@ static void init_servo(void)
 static void servo_set_angle(int angle)
 {
     // 限制角度范围
-    if (angle < 0) angle = 0;
-    if (angle > 180) angle = 180;
+    if (angle < 0)
+        angle = 0;
+    if (angle > 180)
+        angle = 180;
 
     // 计算对应的脉宽（微秒）
     int pulse_width = SERVO_MIN_PULSE_WIDTH +
-                     (angle * (SERVO_MAX_PULSE_WIDTH - SERVO_MIN_PULSE_WIDTH)) / 180;
+                      (angle * (SERVO_MAX_PULSE_WIDTH - SERVO_MIN_PULSE_WIDTH)) / 180;
 
     // 计算占空比（16位分辨率下）
     // 占空比 = (脉宽 / 周期) * 最大占空比值
@@ -194,26 +194,28 @@ static void servo_set_angle(int angle)
 }
 
 /**
- * @brief 舵机顺时针旋转90度
+ * @brief 舵机顺时针旋转45度
  */
 static void servo_rotate_clockwise(void)
 {
-    int target_angle = current_servo_angle + 90;
-    if (target_angle > 180) target_angle = 180;
+    int target_angle = current_servo_angle + 45;
+    if (target_angle > 180)
+        target_angle = 180;
 
-    ESP_LOGI(TAG, "🔄 舵机顺时针旋转90度: %d° → %d°", current_servo_angle, target_angle);
+    ESP_LOGI(TAG, "🔄 舵机顺时针旋转45度: %d° → %d°", current_servo_angle, target_angle);
     servo_set_angle(target_angle);
 }
 
 /**
- * @brief 舵机逆时针旋转90度
+ * @brief 舵机逆时针旋转45度
  */
 static void servo_rotate_counterclockwise(void)
 {
-    int target_angle = current_servo_angle - 90;
-    if (target_angle < 0) target_angle = 0;
+    int target_angle = current_servo_angle - 45;
+    if (target_angle < 0)
+        target_angle = 0;
 
-    ESP_LOGI(TAG, "🔄 舵机逆时针旋转90度: %d° → %d°", current_servo_angle, target_angle);
+    ESP_LOGI(TAG, "🔄 舵机逆时针旋转45度: %d° → %d°", current_servo_angle, target_angle);
     servo_set_angle(target_angle);
 }
 
@@ -594,6 +596,8 @@ extern "C" void app_main(void)
                     {
                         ESP_LOGI(TAG, "🔄 执行开灯命令 - 舵机顺时针旋转90度");
                         servo_rotate_clockwise();
+                        vTaskDelay(pdMS_TO_TICKS(800));
+                        servo_rotate_counterclockwise();
 
                         // 播放开灯确认音频
                         esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
@@ -604,8 +608,10 @@ extern "C" void app_main(void)
                     }
                     else if (command_id == COMMAND_TURN_OFF_LIGHT)
                     {
-                        ESP_LOGI(TAG, "🔄 执行关灯命令 - 舵机逆时针旋转90度");
+                        ESP_LOGI(TAG, "🔄 执行关灯命令 - 舵机逆时针旋转45度");
                         servo_rotate_counterclockwise();
+                        vTaskDelay(pdMS_TO_TICKS(800));
+                        servo_rotate_clockwise();
 
                         // 播放关灯确认音频
                         esp_err_t audio_ret = bsp_play_audio(light_off, light_off_len);
@@ -630,7 +636,7 @@ extern "C" void app_main(void)
                 command_timeout_start = xTaskGetTickCount();
                 multinet->clean(mn_model_data); // 清理命令词识别缓冲区
                 ESP_LOGI(TAG, "舵机控制命令执行完成，重新开始5秒倒计时");
-                ESP_LOGI(TAG, "可以继续说出指令: '帮我开灯'（顺时针90°）、'帮我关灯'（逆时针90°）或 '拜拜'");
+                ESP_LOGI(TAG, "可以继续说出指令: '帮我开灯'（顺时针45°）、'帮我关灯'（逆时针45°）或 '拜拜'");
             }
             else if (mn_state == ESP_MN_STATE_TIMEOUT)
             {
