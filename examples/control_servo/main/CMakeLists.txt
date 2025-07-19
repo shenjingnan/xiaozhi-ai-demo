@@ -7,6 +7,7 @@ set(requires
 idf_component_register(SRCS
                        main.cc
                        bsp_board.cc
+                       servo_controller.cc
                        INCLUDE_DIRS
                        "."
                        )

@@ -50,20 +50,9 @@ extern "C"
 #include "driver/ledc.h"            // LEDC PWM驱动，用于舵机控制
 }
 
+#include "servo_controller.h" // 舵机控制器类
+
 static const char *TAG = "舵机控制"; // 日志标签
-
-// 舵机控制GPIO和PWM定义
-#define SERVO_GPIO GPIO_NUM_18                 // 舵机PWM信号连接到GPIO18
-#define SERVO_LEDC_TIMER LEDC_TIMER_0          // 使用LEDC定时器0
-#define SERVO_LEDC_CHANNEL LEDC_CHANNEL_0      // 使用LEDC通道0
-#define SERVO_LEDC_MODE LEDC_LOW_SPEED_MODE    // 低速模式
-#define SERVO_PWM_FREQ 50                      // 舵机PWM频率50Hz
-#define SERVO_PWM_RESOLUTION LEDC_TIMER_13_BIT // 13位分辨率（8192级别）
-
-// 舵机PWM脉宽定义（微秒）
-#define SERVO_MIN_PULSE_WIDTH 500     // 0度对应的脉宽（0.5ms）
-#define SERVO_MAX_PULSE_WIDTH 2500    // 180度对应的脉宽（2.5ms）
-#define SERVO_CENTER_PULSE_WIDTH 1250 // 45度对应的脉宽（1.25ms）
 
 // 系统状态定义
 typedef enum
@@ -101,130 +90,8 @@ static model_iface_data_t *mn_model_data = NULL;
 static TickType_t command_timeout_start = 0;
 static const TickType_t COMMAND_TIMEOUT_MS = 5000; // 5秒超时
 
-// 舵机状态变量
-static int current_servo_angle = 45; // 当前舵机角度，初始为45度（中位）
-
-// 函数声明
-static void servo_set_angle(int angle);
-static void servo_rotate(int angle);
-
-/**
- * @brief 初始化舵机PWM控制
- *
- * 配置GPIO18为PWM输出模式，用于控制舵机
- * PWM频率：50Hz，脉宽范围：0.5ms-2.5ms对应0-180度
- */
-static void init_servo(void)
-{
-    ESP_LOGI(TAG, "正在初始化舵机 (GPIO18)...");
-
-    // 配置LEDC定时器
-    ledc_timer_config_t ledc_timer = {
-        .speed_mode = SERVO_LEDC_MODE,
-        .duty_resolution = SERVO_PWM_RESOLUTION,
-        .timer_num = SERVO_LEDC_TIMER,
-        .freq_hz = SERVO_PWM_FREQ,
-        .clk_cfg = LEDC_AUTO_CLK,
-        .deconfigure = false};
-    esp_err_t ret = ledc_timer_config(&ledc_timer);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "LEDC定时器配置失败: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    // 配置LEDC通道
-    ledc_channel_config_t ledc_channel = {
-        .gpio_num = SERVO_GPIO,
-        .speed_mode = SERVO_LEDC_MODE,
-        .channel = SERVO_LEDC_CHANNEL,
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = SERVO_LEDC_TIMER,
-        .duty = 0, // 初始占空比为0
-        .hpoint = 0,
-        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD, // 默认模式：无输出时不关闭电源域
-        .flags = {0}};
-    ret = ledc_channel_config(&ledc_channel);
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "LEDC通道配置失败: %s", esp_err_to_name(ret));
-        return;
-    }
-
-    // 设置舵机到中位（90度）
-    current_servo_angle = 90;
-    servo_set_angle(current_servo_angle);
-    ESP_LOGI(TAG, "✓ 舵机初始化成功");
-}
-
-/**
- * @brief 设置舵机角度
- *
- * @param angle 目标角度（0-180度）
- */
-static void servo_set_angle(int angle)
-{
-    // 限制角度范围
-    if (angle < 0)
-        angle = 0;
-    if (angle > 180)
-        angle = 180;
-
-    // 计算对应的脉宽（微秒）
-    int pulse_width = SERVO_MIN_PULSE_WIDTH +
-                      (angle * (SERVO_MAX_PULSE_WIDTH - SERVO_MIN_PULSE_WIDTH)) / 180;
-
-    // 计算占空比（16位分辨率下）
-    // 占空比 = (脉宽 / 周期) * 最大占空比值
-    // 周期 = 1/50Hz = 20ms = 20000us
-    uint32_t duty = (pulse_width * ((1 << SERVO_PWM_RESOLUTION) - 1)) / 20000;
-
-    // 设置PWM占空比
-    esp_err_t ret = ledc_set_duty(SERVO_LEDC_MODE, SERVO_LEDC_CHANNEL, duty);
-    if (ret == ESP_OK)
-    {
-        ledc_update_duty(SERVO_LEDC_MODE, SERVO_LEDC_CHANNEL);
-        current_servo_angle = angle;
-        ESP_LOGI(TAG, "舵机转动到 %d 度 (脉宽: %d us, 占空比: %lu)",
-                 angle, pulse_width, duty);
-    }
-    else
-    {
-        ESP_LOGE(TAG, "舵机角度设置失败: %s", esp_err_to_name(ret));
-    }
-}
-
-/**
- * @brief 舵机旋转指定角度
- *
- * @param angle 旋转角度，正数为顺时针，负数为逆时针
- */
-static void servo_rotate(int angle)
-{
-    int target_angle = current_servo_angle + angle;
-
-    // 限制角度范围
-    if (target_angle > 180)
-        target_angle = 180;
-    if (target_angle < 0)
-        target_angle = 0;
-
-    if (angle > 0)
-    {
-        ESP_LOGI(TAG, "🔄 舵机顺时针旋转%d度: %d° → %d°", angle, current_servo_angle, target_angle);
-    }
-    else if (angle < 0)
-    {
-        ESP_LOGI(TAG, "🔄 舵机逆时针旋转%d度: %d° → %d°", -angle, current_servo_angle, target_angle);
-    }
-    else
-    {
-        ESP_LOGI(TAG, "🔄 舵机保持当前位置: %d°", current_servo_angle);
-        return;
-    }
-
-    servo_set_angle(target_angle);
-}
+// 舵机控制器实例
+static ServoController servo_controller;
 
 /**
  * @brief 配置自定义命令词
@@ -363,7 +230,12 @@ static void execute_exit_logic(void)
 extern "C" void app_main(void)
 {
     // ========== 第一步：初始化舵机 ==========
-    init_servo();
+    esp_err_t servo_ret = servo_controller.init();
+    if (servo_ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "舵机初始化失败: %s", esp_err_to_name(servo_ret));
+        return;
+    }
 
     // ========== 第二步：初始化INMP441麦克风硬件 ==========
     ESP_LOGI(TAG, "正在初始化INMP441数字麦克风...");
@@ -602,9 +474,9 @@ extern "C" void app_main(void)
                     if (command_id == COMMAND_TURN_ON_LIGHT)
                     {
                         ESP_LOGI(TAG, "🔄 执行开灯命令 - 舵机顺时针旋转45度");
-                        servo_rotate(45);  // 顺时针旋转45度
+                        servo_controller.rotate(45); // 顺时针旋转45度
                         vTaskDelay(pdMS_TO_TICKS(800));
-                        servo_rotate(-45); // 逆时针旋转45度回到原位
+                        servo_controller.rotate(-45); // 逆时针旋转45度回到原位
 
                         // 播放开灯确认音频
                         esp_err_t audio_ret = bsp_play_audio(light_on, light_on_len);
@@ -616,9 +488,9 @@ extern "C" void app_main(void)
                     else if (command_id == COMMAND_TURN_OFF_LIGHT)
                     {
                         ESP_LOGI(TAG, "🔄 执行关灯命令 - 舵机逆时针旋转45度");
-                        servo_rotate(-45); // 逆时针旋转45度
+                        servo_controller.rotate(-45); // 逆时针旋转45度
                         vTaskDelay(pdMS_TO_TICKS(800));
-                        servo_rotate(45);  // 顺时针旋转45度回到原位
+                        servo_controller.rotate(45); // 顺时针旋转45度回到原位
 
                         // 播放关灯确认音频
                         esp_err_t audio_ret = bsp_play_audio(light_off, light_off_len);
