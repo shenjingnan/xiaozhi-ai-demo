@@ -46,7 +46,6 @@ extern "C"
 #include "mock_voices/light_on.h"   // 开灯音频数据文件
 #include "mock_voices/light_off.h"  // 关灯音频数据文件
 #include "mock_voices/byebye.h"     // 再见音频数据文件
-#include "mock_voices/custom.h"     // 自定义音频数据文件
 #include "driver/gpio.h"            // GPIO驱动
 #include "driver/ledc.h"            // LEDC PWM驱动，用于舵机控制
 }
@@ -77,7 +76,6 @@ typedef enum
 #define COMMAND_TURN_OFF_LIGHT 308 // "帮我关灯"
 #define COMMAND_TURN_ON_LIGHT 309  // "帮我开灯"
 #define COMMAND_BYE_BYE 314        // "拜拜"
-#define COMMAND_CUSTOM 315         // "自定义命令词"
 
 // 命令词配置结构体
 typedef struct
@@ -92,7 +90,6 @@ static const command_config_t custom_commands[] = {
     {COMMAND_TURN_ON_LIGHT, "bang wo kai deng", "帮我开灯"},
     {COMMAND_TURN_OFF_LIGHT, "bang wo guan deng", "帮我关灯"},
     {COMMAND_BYE_BYE, "bai bai", "拜拜"},
-    {COMMAND_CUSTOM, "xian zai an quan wu qing kuang ru he", "现在安全屋情况如何"},
 };
 
 #define CUSTOM_COMMANDS_COUNT (sizeof(custom_commands) / sizeof(custom_commands[0]))
@@ -145,7 +142,7 @@ static void init_servo(void)
         .timer_sel = SERVO_LEDC_TIMER,
         .duty = 0, // 初始占空比为0
         .hpoint = 0,
-        .sleep_mode = LEDC_SLEEP_MODE_INVALID,
+        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD, // 默认模式：无输出时不关闭电源域
         .flags = {0}
     };
     ret = ledc_channel_config(&ledc_channel);
