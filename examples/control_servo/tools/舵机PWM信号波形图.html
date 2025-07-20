@@ -1,371 +1,449 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>舵机PWM控制信号波形图</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <style>
-        body {
-            font-family: 'Arial', sans-serif;
-            margin: 0;
-            padding: 20px;
-            background-color: #f5f5f5;
-        }
-        .container {
-            max-width: 1200px;
-            margin: 0 auto;
-            background: white;
-            padding: 30px;
-            border-radius: 10px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        }
-        h1 {
-            text-align: center;
-            color: #333;
-            margin-bottom: 30px;
-            font-size: 2.5em;
-        }
-        .info-box {
-            background: #e3f2fd;
-            border: 1px solid #2196f3;
-            border-radius: 8px;
-            padding: 20px;
-            margin-bottom: 30px;
-        }
-        .info-box h3 {
-            color: #1976d2;
-            margin-top: 0;
-        }
-        .info-box ul {
-            color: #1565c0;
-            margin: 10px 0 0 20px;
-        }
-        .charts-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
-            gap: 30px;
-            margin-bottom: 30px;
-        }
-        .chart-container {
-            background: #fafafa;
-            border: 1px solid #ddd;
-            border-radius: 8px;
-            padding: 20px;
-        }
-        .chart-title {
-            text-align: center;
-            font-size: 1.2em;
-            font-weight: bold;
-            margin-bottom: 15px;
-        }
-        .chart-canvas {
-            width: 100% !important;
-            height: 300px !important;
-        }
-        .chart-info {
-            display: flex;
-            justify-content: center;
-            gap: 15px;
-            margin-top: 15px;
-            flex-wrap: wrap;
-        }
-        .info-tag {
-            background: white;
-            border: 1px solid #ccc;
-            padding: 5px 10px;
-            border-radius: 4px;
-            font-size: 0.9em;
-            color: #666;
-        }
-        .features-box {
-            background: #fff3e0;
-            border: 1px solid #ff9800;
-            border-radius: 8px;
-            padding: 20px;
-            margin-top: 30px;
-        }
-        .features-box h3 {
-            color: #f57c00;
-            margin-top: 0;
-        }
-        .features-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 20px;
-            margin-top: 15px;
-        }
-        .feature-item h4 {
-            color: #ef6c00;
-            margin-bottom: 8px;
-        }
-        .feature-item ul {
-            color: #e65100;
-            margin: 0 0 0 20px;
-        }
-        .notes-box {
-            background: #e8f5e8;
-            border: 1px solid #4caf50;
-            border-radius: 8px;
-            padding: 20px;
-            margin-top: 20px;
-        }
-        .notes-box h3 {
-            color: #388e3c;
-            margin-top: 0;
-        }
-        .notes-box ul {
-            color: #2e7d32;
-            margin: 10px 0 0 20px;
-        }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MG90S舵机PWM控制信号波形图</title>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+  <style>
+      body {
+          font-family: 'Arial', sans-serif;
+          margin: 0;
+          padding: 20px;
+          background-color: #f5f5f5;
+      }
+      .container {
+          max-width: 1400px;
+          margin: 0 auto;
+          background: white;
+          padding: 30px;
+          border-radius: 10px;
+          box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+      }
+      h1 {
+          text-align: center;
+          color: #333;
+          margin-bottom: 30px;
+          font-size: 2.5em;
+      }
+      .info-box {
+          background: #e3f2fd;
+          border: 1px solid #2196f3;
+          border-radius: 8px;
+          padding: 20px;
+          margin-bottom: 30px;
+      }
+      .info-box h3 {
+          color: #1976d2;
+          margin-top: 0;
+      }
+      .info-box ul {
+          color: #1565c0;
+          margin: 10px 0 0 20px;
+      }
+      .formula-box {
+          background: #f3e5f5;
+          border: 1px solid #9c27b0;
+          border-radius: 8px;
+          padding: 20px;
+          margin-bottom: 30px;
+          text-align: center;
+      }
+      .formula-box h3 {
+          color: #7b1fa2;
+          margin-top: 0;
+      }
+      .formula {
+          font-size: 1.2em;
+          font-weight: bold;
+          color: #6a1b9a;
+          background: white;
+          padding: 10px;
+          border-radius: 5px;
+          margin: 10px 0;
+      }
+      .charts-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(450px, 1fr));
+          gap: 25px;
+          margin-bottom: 30px;
+      }
+      .chart-container {
+          background: #fafafa;
+          border: 1px solid #ddd;
+          border-radius: 8px;
+          padding: 20px;
+      }
+      .chart-title {
+          text-align: center;
+          font-size: 1.2em;
+          font-weight: bold;
+          margin-bottom: 15px;
+      }
+      .chart-canvas {
+          width: 100%;
+          height: 280px;
+      }
+      .chart-info {
+          display: flex;
+          justify-content: center;
+          gap: 12px;
+          margin-top: 15px;
+          flex-wrap: wrap;
+      }
+      .info-tag {
+          background: white;
+          border: 1px solid #ccc;
+          padding: 5px 10px;
+          border-radius: 4px;
+          font-size: 0.9em;
+          color: #666;
+      }
+      .features-box {
+          background: #fff3e0;
+          border: 1px solid #ff9800;
+          border-radius: 8px;
+          padding: 20px;
+          margin-top: 30px;
+      }
+      .features-box h3 {
+          color: #f57c00;
+          margin-top: 0;
+      }
+      .features-grid {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+          gap: 20px;
+          margin-top: 15px;
+      }
+      .feature-item h4 {
+          color: #ef6c00;
+          margin-bottom: 8px;
+      }
+      .feature-item ul {
+          color: #e65100;
+          margin: 0 0 0 20px;
+      }
+      .notes-box {
+          background: #e8f5e8;
+          border: 1px solid #4caf50;
+          border-radius: 8px;
+          padding: 20px;
+          margin-top: 20px;
+      }
+      .notes-box h3 {
+          color: #388e3c;
+          margin-top: 0;
+      }
+      .notes-box ul {
+          color: #2e7d32;
+          margin: 10px 0 0 20px;
+      }
+  </style>
 </head>
 <body>
-    <div class="container">
-        <h1>舵机PWM控制信号波形图</h1>
-        
-        <div class="info-box">
-            <h3>舵机PWM控制原理：</h3>
-            <p>舵机使用周期为20ms的PWM信号控制，通过改变脉冲宽度来控制转角：</p>
-            <ul>
-                <li>1.0ms脉宽 → 0度</li>
-                <li>1.25ms脉宽 → 45度</li>
-                <li>1.5ms脉宽 → 90度</li>
-                <li>2.0ms脉宽 → 180度</li>
-            </ul>
-        </div>
+  <div class="container">
+      <h1>MG90S舵机PWM控制信号波形图</h1>
+      
+      <div class="info-box">
+          <h3>MG90S舵机技术规格：</h3>
+          <ul>
+              <li>型号：MG90S微型舵机</li>
+              <li>角度范围：0-180度</li>
+              <li>PWM周期：20ms (50Hz)</li>
+              <li>脉冲宽度范围：0.5ms-2.5ms</li>
+              <li>工作电压：4.8V-6V</li>
+              <li>控制精度：±1度</li>
+          </ul>
+      </div>
 
-        <div class="charts-grid">
-            <div class="chart-container">
-                <div class="chart-title" style="color: #ff6b6b;">0度 - 1ms脉宽</div>
-                <canvas id="chart0" class="chart-canvas"></canvas>
-                <div class="chart-info">
-                    <span class="info-tag">角度: 0°</span>
-                    <span class="info-tag">脉宽: 1.0ms</span>
-                    <span class="info-tag">占空比: 5.0%</span>
-                </div>
-            </div>
+      <div class="formula-box">
+          <h3>脉冲宽度计算公式：</h3>
+          <div class="formula">
+              脉冲宽度 = 0.5ms + (角度/180°) × (2.5ms - 0.5ms)
+          </div>
+          <div class="formula">
+              脉冲宽度 = 0.5ms + (角度/180°) × 2.0ms
+          </div>
+      </div>
 
-            <div class="chart-container">
-                <div class="chart-title" style="color: #ffa726;">45度 - 1.25ms脉宽</div>
-                <canvas id="chart45" class="chart-canvas"></canvas>
-                <div class="chart-info">
-                    <span class="info-tag">角度: 45°</span>
-                    <span class="info-tag">脉宽: 1.25ms</span>
-                    <span class="info-tag">占空比: 6.25%</span>
-                </div>
-            </div>
+      <div class="charts-grid">
+          <div class="chart-container">
+              <div class="chart-title" style="color: #ff6b6b;">0° - 0.5ms脉宽</div>
+              <div id="chart0" class="chart-canvas"></div>
+              <div class="chart-info">
+                  <span class="info-tag">角度: 0°</span>
+                  <span class="info-tag">脉宽: 0.5ms</span>
+                  <span class="info-tag">占空比: 2.5%</span>
+              </div>
+          </div>
 
-            <div class="chart-container">
-                <div class="chart-title" style="color: #4ecdc4;">90度 - 1.5ms脉宽</div>
-                <canvas id="chart90" class="chart-canvas"></canvas>
-                <div class="chart-info">
-                    <span class="info-tag">角度: 90°</span>
-                    <span class="info-tag">脉宽: 1.5ms</span>
-                    <span class="info-tag">占空比: 7.5%</span>
-                </div>
-            </div>
+          <div class="chart-container">
+              <div class="chart-title" style="color: #ff9800;">45° - 1.0ms脉宽</div>
+              <div id="chart45" class="chart-canvas"></div>
+              <div class="chart-info">
+                  <span class="info-tag">角度: 45°</span>
+                  <span class="info-tag">脉宽: 1.0ms</span>
+                  <span class="info-tag">占空比: 5.0%</span>
+              </div>
+          </div>
 
-            <div class="chart-container">
-                <div class="chart-title" style="color: #45b7d1;">180度 - 2ms脉宽</div>
-                <canvas id="chart180" class="chart-canvas"></canvas>
-                <div class="chart-info">
-                    <span class="info-tag">角度: 180°</span>
-                    <span class="info-tag">脉宽: 2.0ms</span>
-                    <span class="info-tag">占空比: 10.0%</span>
-                </div>
-            </div>
-        </div>
+          <div class="chart-container">
+              <div class="chart-title" style="color: #ffa726;">67.5° - 1.25ms脉宽</div>
+              <div id="chart67" class="chart-canvas"></div>
+              <div class="chart-info">
+                  <span class="info-tag">角度: 67.5°</span>
+                  <span class="info-tag">脉宽: 1.25ms</span>
+                  <span class="info-tag">占空比: 6.25%</span>
+              </div>
+          </div>
 
-        <div class="features-box">
-            <h3>舵机PWM信号特点：</h3>
-            <div class="features-grid">
-                <div class="feature-item">
-                    <h4>时序特征：</h4>
-                    <ul>
-                        <li>固定周期：20ms (50Hz)</li>
-                        <li>脉宽范围：1-2ms</li>
-                        <li>电压幅度：通常5V</li>
-                        <li>控制精度：±1-2度</li>
-                    </ul>
-                </div>
-                <div class="feature-item">
-                    <h4>控制原理：</h4>
-                    <ul>
-                        <li>脉宽决定舵机角度</li>
-                        <li>周期保持恒定20ms</li>
-                        <li>线性关系：脉宽↔角度</li>
-                        <li>连续发送保持位置</li>
-                    </ul>
-                </div>
-            </div>
-        </div>
+          <div class="chart-container">
+              <div class="chart-title" style="color: #4ecdc4;">90° - 1.5ms脉宽</div>
+              <div id="chart90" class="chart-canvas"></div>
+              <div class="chart-info">
+                  <span class="info-tag">角度: 90°</span>
+                  <span class="info-tag">脉宽: 1.5ms</span>
+                  <span class="info-tag">占空比: 7.5%</span>
+              </div>
+          </div>
 
-        <div class="notes-box">
-            <h3>实际应用注意事项：</h3>
-            <ul>
-                <li>不同品牌舵机的脉宽范围可能略有差异（0.5-2.5ms）</li>
-                <li>需要持续发送PWM信号来保持舵机位置</li>
-                <li>舵机启动时需要一定的响应时间</li>
-                <li>电源要求稳定，通常需要4.8V-6V供电</li>
-            </ul>
-        </div>
-    </div>
+          <div class="chart-container">
+              <div class="chart-title" style="color: #66bb6a;">135° - 2.0ms脉宽</div>
+              <div id="chart135" class="chart-canvas"></div>
+              <div class="chart-info">
+                  <span class="info-tag">角度: 135°</span>
+                  <span class="info-tag">脉宽: 2.0ms</span>
+                  <span class="info-tag">占空比: 10.0%</span>
+              </div>
+          </div>
 
-    <script>
-        // 生成PWM数据的函数
-        function generatePWMData(pulseWidth, cycles = 3) {
-            const period = 20; // 20ms周期
-            const data = [];
-            const samplesPerMs = 2; // 每毫秒2个采样点
-            const totalSamples = period * samplesPerMs * cycles;
-            
-            for (let i = 0; i <= totalSamples; i++) {
-                const timeMs = i / samplesPerMs;
-                const cycleTime = timeMs % period;
-                const voltage = cycleTime <= pulseWidth ? 5 : 0;
-                
-                data.push({
-                    x: timeMs,
-                    y: voltage
-                });
-            }
-            
-            return data;
-        }
+          <div class="chart-container">
+              <div class="chart-title" style="color: #45b7d1;">180° - 2.5ms脉宽</div>
+              <div id="chart180" class="chart-canvas"></div>
+              <div class="chart-info">
+                  <span class="info-tag">角度: 180°</span>
+                  <span class="info-tag">脉宽: 2.5ms</span>
+                  <span class="info-tag">占空比: 12.5%</span>
+              </div>
+          </div>
+      </div>
 
-        // 创建图表的函数
-        function createChart(canvasId, pulseWidth, color) {
-            const ctx = document.getElementById(canvasId).getContext('2d');
-            const data = generatePWMData(pulseWidth);
-            
-            new Chart(ctx, {
-                type: 'line',
-                data: {
-                    datasets: [{
-                        label: '电压',
-                        data: data,
-                        borderColor: color,
-                        backgroundColor: color + '20',
-                        borderWidth: 2.5,
-                        fill: false,
-                        stepped: true,
-                        pointRadius: 0,
-                        pointHoverRadius: 4,
-                        pointHoverBackgroundColor: color,
-                        pointHoverBorderColor: '#fff',
-                        pointHoverBorderWidth: 2
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    interaction: {
-                        intersect: false,
-                        mode: 'index'
-                    },
-                    scales: {
-                        x: {
-                            type: 'linear',
-                            title: {
-                                display: true,
-                                text: '时间 (ms)',
-                                font: {
-                                    size: 12,
-                                    weight: 'bold'
-                                }
-                            },
-                            min: 0,
-                            max: 60,
-                            ticks: {
-                                stepSize: 10,
-                                callback: function(value) {
-                                    return value + 'ms';
-                                }
-                            },
-                            grid: {
-                                color: '#e0e0e0'
-                            }
-                        },
-                        y: {
-                            title: {
-                                display: true,
-                                text: '电压 (V)',
-                                font: {
-                                    size: 12,
-                                    weight: 'bold'
-                                }
-                            },
-                            min: 0,
-                            max: 6,
-                            ticks: {
-                                stepSize: 1,
-                                callback: function(value) {
-                                    return value + 'V';
-                                }
-                            },
-                            grid: {
-                                color: '#e0e0e0'
-                            }
-                        }
-                    },
-                    plugins: {
-                        legend: {
-                            display: false
-                        },
-                        tooltip: {
-                            backgroundColor: 'rgba(0,0,0,0.8)',
-                            titleColor: '#fff',
-                            bodyColor: '#fff',
-                            borderColor: color,
-                            borderWidth: 1,
-                            cornerRadius: 6,
-                            displayColors: false,
-                            callbacks: {
-                                title: function(context) {
-                                    const timeMs = context[0].parsed.x;
-                                    const cycleTime = timeMs % 20;
-                                    const cycleNumber = Math.floor(timeMs / 20) + 1;
-                                    return [
-                                        `时间: ${timeMs.toFixed(1)}ms`,
-                                        `周期 ${cycleNumber}, 周期内时间: ${cycleTime.toFixed(1)}ms`
-                                    ];
-                                },
-                                label: function(context) {
-                                    const voltage = context.parsed.y;
-                                    const timeMs = context.parsed.x;
-                                    const cycleTime = timeMs % 20;
-                                    const status = voltage > 0 ? '高电平' : '低电平';
-                                    
-                                    let additional = '';
-                                    if (voltage > 0) {
-                                        additional = ` (脉冲宽度: ${pulseWidth}ms)`;
-                                    }
-                                    
-                                    return [
-                                        `电压: ${voltage}V`,
-                                        `状态: ${status}${additional}`
-                                    ];
-                                }
-                            }
-                        }
-                    },
-                    elements: {
-                        line: {
-                            tension: 0
-                        }
-                    }
-                }
-            });
-        }
+      <div class="features-box">
+          <h3>MG90S舵机PWM信号特点：</h3>
+          <div class="features-grid">
+              <div class="feature-item">
+                  <h4>时序特征：</h4>
+                  <ul>
+                      <li>固定周期：20ms (50Hz)</li>
+                      <li>脉宽范围：0.5ms-2.5ms</li>
+                      <li>电压幅度：通常5V TTL</li>
+                      <li>控制精度：±1度</li>
+                      <li>响应时间：60°/0.1s</li>
+                  </ul>
+              </div>
+              <div class="feature-item">
+                  <h4>控制原理：</h4>
+                  <ul>
+                      <li>脉宽线性对应角度</li>
+                      <li>周期恒定20ms</li>
+                      <li>数字信号控制</li>
+                      <li>位置反馈控制</li>
+                      <li>连续发送保持位置</li>
+                  </ul>
+              </div>
+              <div class="feature-item">
+                  <h4>应用场景：</h4>
+                  <ul>
+                      <li>机器人关节控制</li>
+                      <li>云台控制系统</li>
+                      <li>模型飞机舵面</li>
+                      <li>自动化设备</li>
+                      <li>教学实验平台</li>
+                  </ul>
+              </div>
+          </div>
+      </div>
 
-        // 创建所有图表
-        window.onload = function() {
-            createChart('chart0', 1.0, '#ff6b6b');     // 0度
-            createChart('chart45', 1.25, '#ffa726');   // 45度
-            createChart('chart90', 1.5, '#4ecdc4');    // 90度
-            createChart('chart180', 2.0, '#45b7d1');   // 180度
-        };
-    </script>
+      <div class="notes-box">
+          <h3>实际应用注意事项：</h3>
+          <ul>
+              <li><strong>脉宽精度：</strong>不同厂家的舵机脉宽范围可能略有差异，建议实测校准</li>
+              <li><strong>信号连续性：</strong>需要持续发送PWM信号来保持舵机位置，停止信号后舵机会失去保持力</li>
+              <li><strong>响应时间：</strong>舵机从一个角度转到另一个角度需要时间，不能瞬间到位</li>
+              <li><strong>电源要求：</strong>MG90S需要稳定的4.8V-6V供电，电流需求约100-300mA</li>
+              <li><strong>负载能力：</strong>扭矩约1.8kg·cm@4.8V，超载会影响精度或损坏舵机</li>
+              <li><strong>信号质量：</strong>PWM信号应避免干扰，建议使用屏蔽线或滤波电路</li>
+          </ul>
+      </div>
+  </div>
+
+  <script>
+      // 生成PWM数据的函数
+      function generatePWMData(pulseWidth, cycles = 3) {
+          const period = 20; // 20ms周期
+          const data = [];
+          const samplesPerMs = 8; // 每毫秒8个采样点，提高精度
+          const totalSamples = period * samplesPerMs * cycles;
+          
+          for (let i = 0; i <= totalSamples; i++) {
+              const timeMs = i / samplesPerMs;
+              const cycleTime = timeMs % period;
+              const voltage = cycleTime <= pulseWidth ? 5 : 0;
+              
+              data.push([timeMs, voltage]);
+          }
+          
+          return data;
+      }
+
+      // 创建ECharts图表的函数
+      function createEChart(containerId, pulseWidth, color, angle) {
+          const chartDom = document.getElementById(containerId);
+          const myChart = echarts.init(chartDom);
+          const data = generatePWMData(pulseWidth);
+          
+          // 计算占空比
+          const dutyCycle = (pulseWidth / 20 * 100).toFixed(1);
+          
+          const option = {
+              grid: {
+                  left: '12%',
+                  right: '5%',
+                  top: '8%',
+                  bottom: '18%'
+              },
+              xAxis: {
+                  type: 'value',
+                  name: '时间 (ms)',
+                  nameLocation: 'middle',
+                  nameGap: 25,
+                  nameTextStyle: {
+                      fontSize: 12,
+                      fontWeight: 'bold'
+                  },
+                  min: 0,
+                  max: 60,
+                  interval: 10,
+                  axisLabel: {
+                      formatter: '{value}ms',
+                      fontSize: 11
+                  },
+                  splitLine: {
+                      show: true,
+                      lineStyle: {
+                          color: '#e0e0e0',
+                          type: 'dashed'
+                      }
+                  }
+              },
+              yAxis: {
+                  type: 'value',
+                  name: '电压 (V)',
+                  nameLocation: 'middle',
+                  nameGap: 40,
+                  nameTextStyle: {
+                      fontSize: 12,
+                      fontWeight: 'bold'
+                  },
+                  min: 0,
+                  max: 6,
+                  interval: 1,
+                  axisLabel: {
+                      formatter: '{value}V',
+                      fontSize: 11
+                  },
+                  splitLine: {
+                      show: true,
+                      lineStyle: {
+                          color: '#e0e0e0',
+                          type: 'dashed'
+                      }
+                  }
+              },
+              series: [{
+                  name: 'PWM信号',
+                  type: 'line',
+                  data: data,
+                  lineStyle: {
+                      color: color,
+                      width: 3
+                  },
+                  symbol: 'none',
+                  step: 'end', // 阶梯线效果
+                  areaStyle: {
+                      color: {
+                          type: 'linear',
+                          x: 0,
+                          y: 0,
+                          x2: 0,
+                          y2: 1,
+                          colorStops: [{
+                              offset: 0,
+                              color: color + '50'
+                          }, {
+                              offset: 1,
+                              color: color + '15'
+                          }]
+                      }
+                  }
+              }],
+              tooltip: {
+                  trigger: 'axis',
+                  backgroundColor: 'rgba(0,0,0,0.85)',
+                  borderColor: color,
+                  borderWidth: 2,
+                  textStyle: {
+                      color: '#fff',
+                      fontSize: 12
+                  },
+                  formatter: function(params) {
+                      const point = params[0];
+                      const timeMs = point.data[0];
+                      const voltage = point.data[1];
+                      const cycleTime = timeMs % 20;
+                      const cycleNumber = Math.floor(timeMs / 20) + 1;
+                      const status = voltage > 0 ? '高电平' : '低电平';
+                      
+                      let html = `
+                          <div style="font-weight: bold; margin-bottom: 8px; color: ${color};">
+                              MG90S - ${angle}° 位置
+                          </div>
+                          <div>时间: ${timeMs.toFixed(2)}ms</div>
+                          <div>周期 ${cycleNumber} (${cycleTime.toFixed(2)}ms)</div>
+                          <div>电压: ${voltage}V (${status})</div>
+                          <div>脉冲宽度: ${pulseWidth}ms</div>
+                          <div>占空比: ${dutyCycle}%</div>
+                      `;
+                      
+                      return html;
+                  }
+              },
+              animation: {
+                  duration: 1200,
+                  easing: 'cubicOut'
+              }
+          };
+          
+          myChart.setOption(option);
+          
+          // 响应式处理
+          window.addEventListener('resize', function() {
+              myChart.resize();
+          });
+          
+          return myChart;
+      }
+
+      // 页面加载完成后创建所有图表
+      window.onload = function() {
+          createEChart('chart0', 0.5, '#ff6b6b', 0);      // 0度
+          createEChart('chart45', 1.0, '#ff9800', 45);    // 45度
+          createEChart('chart67', 1.25, '#ffa726', 67.5); // 67.5度
+          createEChart('chart90', 1.5, '#4ecdc4', 90);    // 90度
+          createEChart('chart135', 2.0, '#66bb6a', 135);  // 135度
+          createEChart('chart180', 2.5, '#45b7d1', 180);  // 180度
+      };
+  </script>
 </body>
 </html>
